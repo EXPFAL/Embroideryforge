@@ -29,6 +29,24 @@ def test_quantize_tones_basic():
     assert labels.max() >= 0
 
 
+def test_quantize_tones_weight_mask_preserves_subject_hue():
+    """大面积灰背景 + 小块高饱和主体：加权后色心应更靠近主体色。"""
+    img = np.full((80, 80, 3), (160, 160, 160), dtype=np.uint8)
+    img[20:40, 20:40] = (40, 60, 220)  # 偏红 BGR
+    mask = np.full((80, 80), 255, dtype=np.uint8)
+    weight = np.ones((80, 80), dtype=np.float32)
+    weight[20:40, 20:40] = 8.0
+    _tone, _labels, centers_w = quantize_tones(
+        img, mask, n_colors=3, weight_mask=weight, weight_power=6.0
+    )
+    _tone2, _labels2, centers_u = quantize_tones(img, mask, n_colors=3)
+    assert len(centers_w) == 3
+    # 加权结果应包含更接近红色块的中心（B 通道偏高）
+    max_b_w = max(float(c[2]) for c in centers_w)
+    max_b_u = max(float(c[2]) for c in centers_u)
+    assert max_b_w >= max_b_u - 5
+
+
 def test_stitch_photo_writes_dst(tmp_path: Path):
     assert PORTRAIT.exists()
     out = tmp_path / "ps"

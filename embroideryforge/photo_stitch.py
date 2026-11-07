@@ -160,8 +160,14 @@ def quantize_tones(
     n_colors: int = 9,
     *,
     pre_smooth: bool = False,
+    weight_mask: np.ndarray | None = None,
+    weight_power: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
-    """Lab k-means 量化。返回 (tone_bgr, label_map, centers_bgr)。"""
+    """Lab k-means 量化。返回 (tone_bgr, label_map, centers_bgr)。
+
+    weight_mask：可选逐像素权重（如主体/脸/手偏置）。高权像素重复采样后再聚类，
+    再把全部前景像素标到最近中心——避免场景背景占满色槽。
+    """
     n_colors = max(2, min(int(n_colors), 16))
     fg = mask > 0
     if int(fg.sum()) < 50:
@@ -171,15 +177,46 @@ def quantize_tones(
     src = cv2.bilateralFilter(bgr, 7, 55, 55) if pre_smooth else bgr
     lab = cv2.cvtColor(src, cv2.COLOR_BGR2LAB).astype(np.float32)
     samples = lab[fg]
+    train = samples
+    if (
+        weight_mask is not None
+        and weight_mask.shape[:2] == mask.shape[:2]
+        and float(weight_power) > 1.0
+    ):
+        w = weight_mask[fg].astype(np.float32)
+        w = np.clip(w, 0.0, None)
+        if float(w.max()) > 0.0:
+            # 相对权重 → 1..ceil(weight_power) 次重复
+            wn = w / max(float(w.max()), 1e-6)
+            reps = np.maximum(
+                1, np.round(1.0 + wn * (float(weight_power) - 1.0)).astype(np.int32)
+            )
+            reps = np.clip(reps, 1, max(2, int(np.ceil(weight_power)) + 2))
+            train = np.repeat(samples, reps, axis=0)
+            max_total = min(max(len(samples) * 4, n_colors * 200), 220_000)
+            if len(train) > max_total:
+                rng = np.random.default_rng(42)
+                pick = rng.choice(len(train), size=max_total, replace=False)
+                train = train[pick]
+
+    n_k = min(n_colors, max(2, len(train)))
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.5)
-    _compact, labels, centers = cv2.kmeans(
-        samples, n_colors, None, criteria, 4, cv2.KMEANS_PP_CENTERS
+    _compact, _labels_train, centers = cv2.kmeans(
+        train, n_k, None, criteria, 4, cv2.KMEANS_PP_CENTERS
     )
+    # 全前景按最近中心标号（训练子集标签不可直接映射）
+    labels = np.empty(len(samples), dtype=np.int32)
+    chunk = 60_000
+    for i0 in range(0, len(samples), chunk):
+        sl = samples[i0 : i0 + chunk]
+        d2 = ((sl[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        labels[i0 : i0 + chunk] = d2.argmin(axis=1).astype(np.int32)
+
     centers_u8 = np.clip(centers, 0, 255).astype(np.uint8)
     centers_bgr = cv2.cvtColor(centers_u8.reshape(1, -1, 3), cv2.COLOR_LAB2BGR).reshape(-1, 3)
 
     label_map = np.full(bgr.shape[:2], -1, dtype=np.int32)
-    label_map[fg] = labels.ravel().astype(np.int32)
+    label_map[fg] = labels
     tone = np.full_like(bgr, 255)
     for i, c in enumerate(centers_bgr):
         tone[label_map == i] = c

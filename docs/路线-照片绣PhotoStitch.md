@@ -256,3 +256,53 @@ python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports
 ```
 
 **非主张**：不引入 SegFormer/Torch；不把 nuizu/OpenStitch 嵌进主链。
+
+### P4 / V6.1 — 人物主体 + 场景（浅做）
+
+纯风景不单开路线。人物+环境用 `--bg keep`（或 `scene`）：
+
+- 工作图保留全帧；`subject_mask`（rembg）仅作**主体加权**
+- 主体：密密度 / 细 step；背景疏针当氛围
+- 引擎仍 `photo_stitch_density_v6`，`mode=density_scene`
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v6 --mode hybrid --density-unified --bg keep --colors 11 --resolution high
+```
+
+### P4 / V6.2 — 主体偏置调色 + 场景疏密校正 + 脸手微密
+
+针对 V6.1 牛仔样例短板（色阶塌成米灰、背景缝隙过大、bust 脸罩稀释五官）：
+
+| 项 | 策略 |
+|----|------|
+| 调色 | Lab k-means **主体偏置采样**（person + face + hand 加权）；场景色数上限 **16** |
+| 背景疏密 | `bg_dens_scale=0.58`、`bg_step_scale=1.40`、`floor_bg=0.07`（缓和缝隙，仍疏于主体） |
+| 脸/手 | MediaPipe 优先；bust 去帽冠+肤色收紧；脸/手 **Bayer 全分辨率**留针（绕过 step≥1 网格）；Canny 五官核；手 dens×1.38 + 膨胀 |
+| 非主张 | 仍不嵌 SegFormer/Torch、nuizu/OpenStitch；**不**恢复 V5 衣褶/骨骼叠层 |
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v62b --mode hybrid --density-unified --bg keep --colors 12 --resolution high
+```
+
+### P4 / V6.3 — 人物与背景分轨再整合
+
+脸糊成一片：整帧共用一套 Lab 色心 + 蛇形扫描。`--bg keep|scene` 时改为双轨：
+
+| 轨 | 内容 |
+|----|------|
+| BG | `dens_mask & ~erode(person)`；独立量化；**禁止 bilateral**；轻锐化 + Canny 边 dens；`step×1.22`；tag `dens_bg_*` |
+| FG | `dilate(person)`；整体 unsharp + **脸区 CLAHE/再锐化**；脸/手加权量化；全分辨率留针；tag `dens_fg_*` |
+
+针序：先 BG 后 FG（同画布坐标）。`mode=density_split`。非场景仍单轨 `density_unified`。
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v63b --mode hybrid --density-unified --bg keep --colors 12 --resolution high
+```
+
+**V6.3c**：`max_side=720` + 第三轨 `dens_face_*`（仅脸窗，更细 step，后绣压在 FG 上）。
+
+**V6.3d**：脸密轨**复用 FG 的 label/centers**（不再二次 k-means），避免头身两截色；脸区 CLAHE 减弱并与原体混合。
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v63d --mode hybrid --density-unified --bg keep --colors 12 --resolution high
+```

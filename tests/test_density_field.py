@@ -22,6 +22,7 @@ from embroideryforge.density_field import (
 ROOT = Path(__file__).resolve().parents[1]
 PORTRAIT = ROOT / "samples" / "golden-portrait.jpg"
 FIGURE = ROOT / "samples" / "test_figure_uniform.jpg"
+COWBOY = ROOT / "samples" / "test_figure_cowboy.jpg"
 
 
 def test_density_map_darker_is_denser():
@@ -180,6 +181,29 @@ def test_run_density_v6_figure_unified(tmp_path: Path):
     assert "hand_bones" not in tags
     assert "prop_outline" not in tags
     assert (out / "figure_layout.png").is_file()
+    assert (out / "auto.dst").is_file()
+    assert result["report"]["stitches"] > 500
+
+
+def test_run_density_v6_scene_split(tmp_path: Path):
+    if not COWBOY.exists():
+        return
+    out = tmp_path / "cowboy_v63"
+    result = run_density_v6_unified(
+        COWBOY,
+        out,
+        n_colors=10,
+        resolution="low",
+        bg_mode="keep",
+    )
+    assert result["ok"]
+    assert result["meta"]["mode"] == "density_split"
+    assert result["meta"]["v6"].get("v63_person_bg_split") is True
+    tags = [str(L.get("tag")) for L in result["meta"]["layers"]]
+    assert any(t.startswith("dens_bg_") for t in tags)
+    assert any(t.startswith("dens_fg_") for t in tags)
+    assert (out / "bg_mask.png").is_file()
+    assert (out / "fg_mask.png").is_file()
     assert (out / "auto.dst").is_file()
     assert result["report"]["stitches"] > 500
 

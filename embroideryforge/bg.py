@@ -126,12 +126,31 @@ def prepare_subject(
     mode: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
-    返回 (白底主体图, mask 0/255, meta)。
-    mode: auto | off | rembg | contrast | white
+    返回 (工作图, mask 0/255, meta)。
+    mode: auto | off | rembg | contrast | white | keep | scene
+    keep/scene：保留全帧作工作图；mask=全图；meta.subject_mask 供主体加权。
     """
     if mode == "off":
         full = np.full(bgr.shape[:2], 255, dtype=np.uint8)
         return bgr.copy(), full, {"mode": "off", "applied": False, **border_stats(bgr)}
+
+    if mode in {"keep", "scene"}:
+        fg = mask_rembg(bgr)
+        method = "rembg"
+        if fg is None:
+            fg = mask_illustration_recon(bgr)
+            method = "illustration_recon"
+        full = np.full(bgr.shape[:2], 255, dtype=np.uint8)
+        return bgr.copy(), full, {
+            "mode": mode,
+            "applied": False,
+            "chosen": mode,
+            "method": method,
+            "scene": True,
+            "subject_mask": fg,
+            "fg_frac": float(np.mean(fg > 0)),
+            **border_stats(bgr),
+        }
 
     chosen = detect_bg_mode(bgr) if mode == "auto" else mode
     if chosen == "skip" or (mode == "auto" and chosen == "skip"):

@@ -95,8 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     p_ps.add_argument("--height-mm", type=float, default=70.0)
     p_ps.add_argument(
         "--bg",
-        choices=["auto", "off", "grabcut", "white"],
+        choices=["auto", "off", "grabcut", "white", "keep", "scene"],
         default="auto",
+        help="keep/scene=保留全帧背景，主体加密、场景疏针（V6）",
     )
     p_ps.add_argument(
         "--full-frame",
