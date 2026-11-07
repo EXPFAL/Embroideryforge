@@ -50,9 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     p_auto.add_argument("--llm", action="store_true")
     p_auto.add_argument(
         "--bg",
-        choices=["auto", "off", "grabcut", "white"],
+        choices=["auto", "off", "grabcut", "white", "keep", "scene"],
         default="auto",
-        help="去背景：auto 白底跳过，复杂背景 GrabCut",
+        help="去背景：auto/rembg；keep|scene=保留全帧（与 stitch-photo 一致，插画少用）",
     )
     p_auto.add_argument(
         "--quality",

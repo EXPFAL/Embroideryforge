@@ -306,3 +306,36 @@ python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out expo
 ```powershell
 python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v63d --mode hybrid --density-unified --bg keep --colors 12 --resolution high
 ```
+
+---
+
+## 附录 A — 对照协议与人评（V6.3d 起）
+
+### A.1 固定命令
+
+```powershell
+python -m embroideryforge stitch-photo <样例.jpg> --out exports\photo_stitch_exp\<名>_vN --mode hybrid --density-unified --bg keep --colors 12 --resolution high
+```
+
+- 新实验只升 `vN` / `vNb`，**勿覆盖** [`docs/BASELINE.md`](BASELINE.md) 中的冻结目录  
+- 必交件：`compare_preview.png`、`auto_stitch_thick.png`、`photo_stitch_meta.json`（查 `mode=density_split`、`dens_face_*`）
+
+### A.2 难例对照表（2026-11-07）
+
+| 样例 | 路径 | 脸检测 | 已知难点 | 冻结导出 |
+|------|------|--------|----------|----------|
+| 牛仔+街景 | `samples/test_figure_cowboy.jpg` | 常 `bust`（宽檐帽） | 头身色、街景糊团、帽檐挡脸 | `figure_cowboy_scene_v63d` |
+| 合成脸武侠 | `samples/test_figure_kobe_wuxia.jpg` | 常 `mediapipe` | 脸/颈色差、背景虚化树叶 | `figure_kobe_wuxia_v63d` |
+| 半身制服 | `samples/test_figure_uniform.jpg` | 视构图 | 抠底半身；用 `--bg auto` 非 keep | `figure_uniform_v6` |
+
+### A.3 人评清单（各 1–5 分，≥3 可演示）
+
+| 项 | 看什么 |
+|----|--------|
+| 五官可辨 | 眼/嘴是否成块糊死 |
+| 头身同色 | 脸与衣领是否两套色阶（V6.3d 应明显好于 3c） |
+| 背景可读 | 建筑/树叶是否「一团」；边缘是否可辨 |
+| 缝隙/接缝 | 人物轮廓是否露底或硬边光晕 |
+| 总针数合理 | meta 约 15–40 万（场景）；异常飙升需记原因 |
+
+人评分记在实验笔记或本附录下方追加行即可；**不**跑 chibi `rubric_pass_95`。

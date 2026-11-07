@@ -206,6 +206,13 @@ def test_run_density_v6_scene_split(tmp_path: Path):
     assert (out / "fg_mask.png").is_file()
     assert (out / "auto.dst").is_file()
     assert result["report"]["stitches"] > 500
+    # V6.3d：若有脸密轨，色值须与 FG 共用（无第二套 k-means）
+    if any(t.startswith("dens_face_") for t in tags):
+        assert result["meta"]["v6"].get("v63d_face_share_fg_palette") is True
+        layers = result["meta"]["layers"]
+        fg_hex = {L["hex"] for L in layers if str(L.get("tag", "")).startswith("dens_fg_")}
+        face_hex = {L["hex"] for L in layers if str(L.get("tag", "")).startswith("dens_face_")}
+        assert face_hex and face_hex <= fg_hex
 
 
 def test_run_density_photo_auto_routes_figure(tmp_path: Path):

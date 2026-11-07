@@ -33,7 +33,13 @@
 - **v0.11**：Photo-Stitch **v4 密度场**（`--density-field`）；双轨计划图/针迹  
 - **v0.11.1 / v0.12**：Photo-Stitch **v4.1.1** 为密度场默认；v4.2 结构针/高光抠空已回退（观感差于 v41）
 - **v0.13**：人物+服饰 V5 hybrid+叠针（已失败回退）
-- **v0.14（当前）**：人物+服饰 **V6 整主体统一密度**（`--density-unified` / 半身自动）；近脸仍 v4.1.1；见 `docs/路线-照片绣PhotoStitch.md`  
+- **v0.14**：人物+服饰 **V6 整主体统一密度**（`--density-unified` / 半身自动）；近脸仍 v4.1.1
+- **v0.15（当前）**：照片绣 **V6.3 人物/背景分轨**（`--bg keep|scene` → `mode=density_split`）；脸密轨复用 FG 色阶（V6.3d）；见 [`docs/路线-照片绣PhotoStitch.md`](路线-照片绣PhotoStitch.md)
+
+**验收口径**
+
+- 课题一（chibi / 扁平插画）：`evaluate` 五维，`rubric_pass_95`  
+- 照片绣：**人评 + 四联预览**（`compare_preview.png` / `auto_stitch_thick.png`），**不**套用 chibi 的 similarity≥0.95 作硬门槛  
 
 ### 结构化针法计划 + DeepSeek
 
