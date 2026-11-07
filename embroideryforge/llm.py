@@ -159,6 +159,8 @@ def merge_llm_into_rules(
         if entry.get("stitch") == "running":
             entry["row_spacing_px"] = None
             entry["fill_erode"] = int(entry.get("fill_erode") or 0)
+        elif entry.get("stitch") == "satin" and entry.get("row_spacing_px") is None:
+            entry["row_spacing_px"] = 1.6
         merged_layers.append(entry)
     plan = {
         "schema_version": SCHEMA_VERSION,
@@ -192,12 +194,14 @@ def build_llm_plan(
         "You are an embroidery stitch planner. "
         "Reply with ONE JSON object only (no markdown). "
         f"schema_version must be {SCHEMA_VERSION}. "
-        "For each input layer tag, set: tag, stitch (tatami|running), angle_deg, "
+        "For each input layer tag, set: tag, stitch (tatami|running|satin), angle_deg, "
         "row_spacing_px (null if running), stitch_len_px, order (number), "
         "fill_erode (0-2), enabled (bool). "
-        "Rules of thumb: outline/shoes -> running; large fills -> tatami; "
-        "vary fill angles between adjacent regions; smaller regions denser spacing; "
-        "embroider fills before outline. Keep all given tags."
+        "Rules of thumb (MSEmb-like): outline/shoes/features -> running; "
+        "large fills clothes/hat/hair -> tatami with DIFFERENT angles; "
+        "skin -> tatami but SOFTER (wider spacing, angle near 15-25, NOT 90); "
+        "narrow accents eyes/lips/glasses -> satin; "
+        "embroider fills before features before outline. Keep all given tags."
     )
     user = {
         "task": "produce stitch_plan",

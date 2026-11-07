@@ -14,6 +14,8 @@
 
 企鹅样例 `golden-logo.jpg` / `penguin.dst` 仅作历史对照，不再作为主验收。
 
+人像样例：`samples/golden-portrait.jpg` → `exports/portrait_v1/`（`--domain portrait`，evaluate ≥0.95）。
+
 ## 复现命令
 
 ```powershell

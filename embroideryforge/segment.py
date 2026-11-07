@@ -27,6 +27,18 @@ CHIBI_PALETTE: list[tuple[str, tuple[int, int, int]]] = [
     ("leaf", (165, 217, 185)),
 ]
 
+# 真人像：避免把发/影误挂成 chibi 的 rose
+PORTRAIT_PALETTE: list[tuple[str, tuple[int, int, int]]] = [
+    ("outline", (40, 40, 40)),
+    ("hair", (45, 40, 35)),
+    ("skin", (180, 195, 230)),
+    ("clothes", (40, 200, 230)),      # 亮黄衣等
+    ("hat", (120, 150, 180)),         # 卡其帽
+    ("lips", (90, 90, 180)),
+    ("glasses", (150, 150, 150)),
+    ("highlight", (235, 235, 235)),
+]
+
 
 @dataclass
 class LayerInfo:
@@ -46,9 +58,86 @@ def _bgr_to_hex(bgr: np.ndarray | list[int]) -> str:
 def _role_hint(tag: str) -> str:
     if tag in {"outline", "shoes"}:
         return "running_stroke"
-    if tag in {"eyes", "patches", "leaf"}:
+    if tag in {"eyes", "patches", "leaf", "lips", "glasses"}:
         return "satin_or_small_tatami"
     return "tatami_fill"
+
+
+def detect_palette_domain(bgr: np.ndarray) -> str:
+    """粗判插画 vs 照片。
+
+    照片：色种多、饱和度方差大；扁平插画：硬边拉普拉斯方差高、色种相对少。
+    """
+    h, w = bgr.shape[:2]
+    small = cv2.resize(bgr, (min(160, w), min(160, h)), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    q = (small // 24).astype(np.int32)
+    codes = q[:, :, 0] + q[:, :, 1] * 12 + q[:, :, 2] * 144
+    n_unique = len(np.unique(codes))
+    sat_std = float(hsv[:, :, 1].std())
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    if n_unique >= 140 and sat_std >= 45 and lap < 2500:
+        return "portrait"
+    return "chibi"
+
+
+def _name_center_portrait(
+    bgr: np.ndarray, palette: list[tuple[str, tuple[int, int, int]]]
+) -> str:
+    b, g, r = (int(x) for x in bgr)
+    hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0, 0]
+    hh, ss, vv = (int(x) for x in hsv)
+
+    if vv <= 38:
+        return "outline"
+    # 深褐/黑发（先于唇，避免大块阴影被标 lips）
+    if vv <= 100 and ss <= 80:
+        return "hair"
+    # 亮黄外套
+    if 18 <= hh <= 45 and ss >= 70 and vv >= 90:
+        return "clothes"
+    # 卡其/褐黄帽：中饱和褐，面积通常大于唇
+    if 5 <= hh <= 30 and 25 <= ss <= 110 and 70 <= vv <= 195:
+        return "hat"
+    # 唇：高饱和真红/玫，范围更窄
+    if (hh <= 7 or hh >= 172) and ss >= 85 and 95 <= vv <= 200:
+        return "lips"
+    # 肤色
+    if 3 <= hh <= 32 and 10 <= ss <= 90 and vv >= 115:
+        return "skin"
+    # 眼镜金属/灰
+    if ss <= 50 and 85 <= vv <= 205:
+        return "glasses"
+    if vv >= 215 and ss <= 45:
+        return "highlight"
+
+    best, best_d = "skin", 1e9
+    for name, ref in palette:
+        d = float(
+            np.linalg.norm(
+                np.array([b, g, r], dtype=np.float32) - np.array(ref, dtype=np.float32)
+            )
+        )
+        if d < best_d:
+            best_d = d
+            best = name
+    if best_d > 110:
+        return f"misc_{_bgr_to_hex([b, g, r])[1:]}"
+    return best
+
+
+def _fix_oversized_lips(
+    tags: list[str], counts: np.ndarray, total_fg: int
+) -> list[str]:
+    """唇层若占比过大，多半是帽/发误标 → 改挂 hat。"""
+    if total_fg <= 0:
+        return tags
+    out = list(tags)
+    for i, tag in enumerate(out):
+        if tag == "lips" and counts[i] / total_fg > 0.04:
+            out[i] = "hat"
+    return out
 
 
 def _preprocess(bgr: np.ndarray, upscale: int = 2) -> tuple[np.ndarray, float]:
@@ -61,8 +150,15 @@ def _preprocess(bgr: np.ndarray, upscale: int = 2) -> tuple[np.ndarray, float]:
     return smooth, scale
 
 
-def _name_center(bgr: np.ndarray, palette: list[tuple[str, tuple[int, int, int]]]) -> str:
+def _name_center(
+    bgr: np.ndarray,
+    palette: list[tuple[str, tuple[int, int, int]]],
+    *,
+    domain: str = "chibi",
+) -> str:
     """色心命名：深色 / 绿 / 玫瑰 / 桃皮 / 粉发 / 灰衣，其余最近邻。"""
+    if domain == "portrait":
+        return _name_center_portrait(bgr, palette)
     b, g, r = (int(x) for x in bgr)
     hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0, 0]
     hh, ss, vv = (int(x) for x in hsv)
@@ -116,6 +212,8 @@ def _cluster_and_name(
     k: int,
     ignore_near_white: int,
     palette: list[tuple[str, tuple[int, int, int]]],
+    *,
+    domain: str = "chibi",
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     """返回合并命名后的 label_img、tags、centers。"""
     h, w = bgr.shape[:2]
@@ -136,7 +234,11 @@ def _cluster_and_name(
     raw = raw.reshape(h, w)
 
     # 每个簇命名
-    names = [_name_center(centers_bgr[i], palette) for i in range(k)]
+    names = [_name_center(centers_bgr[i], palette, domain=domain) for i in range(k)]
+    if domain == "portrait":
+        # 先按簇面积修一次 lips（用 raw 计数）
+        raw_counts = np.array([int((raw == i).sum()) for i in range(k)], dtype=np.int64)
+        names = _fix_oversized_lips(names, raw_counts, int(np.sum(raw >= 0)))
 
     # 同名合并
     unique: list[str] = []
@@ -156,6 +258,27 @@ def _cluster_and_name(
         if c:
             sums[mid] += bgr[mask].sum(axis=0)
             counts[mid] += c
+
+    if domain == "portrait":
+        unique = _fix_oversized_lips(unique, counts, int(counts.sum()))
+        # 若改名产生重复，再压一遍 id
+        rebuilt: list[str] = []
+        remap = {}
+        for old_i, n in enumerate(unique):
+            if n not in remap:
+                remap[n] = len(rebuilt)
+                rebuilt.append(n)
+        if len(rebuilt) != len(unique):
+            new_merged = np.full_like(merged, -1)
+            new_sums = np.zeros((len(rebuilt), 3), dtype=np.float64)
+            new_counts = np.zeros(len(rebuilt), dtype=np.int64)
+            for old_i, n in enumerate(unique):
+                ni = remap[n]
+                m = merged == old_i
+                new_merged[m] = ni
+                new_sums[ni] += sums[old_i]
+                new_counts[ni] += counts[old_i]
+            merged, unique, sums, counts = new_merged, rebuilt, new_sums, new_counts
 
     centers = np.zeros((len(unique), 3), dtype=np.uint8)
     for i in range(len(unique)):
@@ -244,6 +367,7 @@ def segment_image(
     ignore_near_white: int = 248,
     simplify_ratio: float = 0.0009,
     upscale: int = 2,
+    domain: str = "auto",
 ) -> dict[str, Any]:
     path = Path(image_path)
     bgr0 = cv2.imread(str(path))
@@ -255,9 +379,16 @@ def segment_image(
     if mode not in {"palette", "kmeans"}:
         raise ValueError("mode 必须是 palette 或 kmeans")
 
+    resolved = domain if domain in {"chibi", "portrait"} else detect_palette_domain(bgr0)
+    palette = PORTRAIT_PALETTE if resolved == "portrait" else CHIBI_PALETTE
+
     # palette 与 kmeans 都走聚类；palette 多一步命名合并
     label_img, tags, centers = _cluster_and_name(
-        bgr, k=k, ignore_near_white=ignore_near_white, palette=CHIBI_PALETTE
+        bgr,
+        k=k,
+        ignore_near_white=ignore_near_white,
+        palette=palette,
+        domain=resolved,
     )
     if mode == "kmeans":
         # 保留分离簇名，不合并
@@ -282,13 +413,18 @@ def segment_image(
     inv = 1.0 / scale
     z_rank = {
         "clothes": 10,
+        "hat": 15,
         "hair": 20,
         "skin": 30,
         "rose": 35,
+        "lips": 38,
         "patches": 40,
         "eyes": 50,
+        "glasses": 52,
         "leaf": 55,
+        "highlight": 58,
         "detail": 60,
+        "features": 85,
         "shoes": 80,
         "outline": 90,
     }
@@ -356,6 +492,7 @@ def segment_image(
         "width": w0,
         "height": h0,
         "mode": mode,
+        "domain": resolved,
         "k": k,
         "source": path.name,
         "layers": [asdict(x) for x in layers],
@@ -375,12 +512,18 @@ def run_segment(
     min_area_ratio: float = 0.0012,
     upscale: int = 2,
     merge_dist: float = 30.0,
+    domain: str = "auto",
 ) -> dict[str, Any]:
     del merge_dist
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = segment_image(
-        image_path, mode=mode, k=k, min_area_ratio=min_area_ratio, upscale=upscale
+        image_path,
+        mode=mode,
+        k=k,
+        min_area_ratio=min_area_ratio,
+        upscale=upscale,
+        domain=domain,
     )
     svg_path = out_dir / "layers.svg"
     json_path = out_dir / "layers.json"

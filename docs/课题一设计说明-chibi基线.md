@@ -76,7 +76,12 @@ python -m embroideryforge evaluate exports\accept_flat_v3 --image samples\golden
 
 复杂背景同理加 `--bg auto`（rembg）。默认 `--quality dense` 逼近手工针数。
 
-## 8. 下一步
+## 8. 已补强（v0.6）
 
+- 窄区 **Satin**；Streamlit 接主链；`vectorize`（VTracer）；术语表 / 针法对照 / StarVector 旁路说明  
+
+## 9. 留给线下开题
+
+- Underlay / pull compensation  
+- 有 GPU 时试 StarVector 与 VTracer 对照  
 - 开题正文固化「LLM 只出 plan → 工具执行 → evaluate」  
-- 可选进入 Project 2  

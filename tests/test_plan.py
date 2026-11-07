@@ -31,9 +31,20 @@ def test_rules_plan_schema():
     assert by_tag["clothes"]["stitch"] == "tatami"
 
 
+def test_rules_plan_satin_for_eyes():
+    layers = [
+        {"tag": "eyes", "hex": "#202020", "role_hint": "satin_or_small_tatami"},
+        {"tag": "clothes", "hex": "#808080", "role_hint": "tatami_fill"},
+    ]
+    plan = build_rules_plan(layers, quality="standard")
+    by_tag = {L["tag"]: L for L in plan["layers"]}
+    assert by_tag["eyes"]["stitch"] == "satin"
+    assert by_tag["eyes"]["row_spacing_px"] is not None
+
+
 def test_plan_overrides_angle(tmp_path: Path):
     assert SAMPLE.exists()
-    seg = segment_image(SAMPLE, mode="palette", k=10, upscale=2)
+    seg = segment_image(SAMPLE, mode="palette", k=10, upscale=2, domain="chibi")
     plan = build_rules_plan(seg["layers"], target_height_mm=70.0)
     for L in plan["layers"]:
         if L["tag"] == "clothes":

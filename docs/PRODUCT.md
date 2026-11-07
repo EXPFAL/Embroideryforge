@@ -2,11 +2,11 @@
 
 ## 用户主路径
 
-1. 打开 Streamlit 工作台  
-2. 上传图案或使用黄金样例  
-3. 调整缩放并生成  
-4. 查看轮廓/主色/针迹预览与针法建议  
-5. 下载 DST，阅读设计说明  
+1. 打开 Streamlit（已接 `stitch-auto`）  
+2. 上传图案或选 `golden-chibi`  
+3. 可选 DeepSeek plan / 密度 / 去背景  
+4. 查看分层对照、针迹预览、`stitch_plan`  
+5. 下载 DST；一键 evaluate  
 
 ## 与课题评估对齐
 
@@ -25,6 +25,13 @@
 - v0.3：`stitch-auto` 按层 Tatami/Running 导出 `auto.dst`（**chibi_v4 已冻结**）  
 - v0.4：结构化 `stitch_plan.json`（规则 / DeepSeek）+ `evaluate`  
 - v0.5：去背景（rembg/auto）+ `--quality dense` + 课题五维 `rubric`（目标 ≥0.95）  
+- v0.6：Satin 窄区；VTracer `vectorize` 旁路；GUI 对齐主链；术语/针法/MSEmb 笔记  
+- v0.7：人像域 `portrait`；帽/发/衣标签；msemb 启发式  
+- v0.8：照片 EFR 对照轨；`compare-photo`  
+- v0.9：`stitch-photo` P1（脸 ROI 色调短填）  
+- v0.10：`stitch-photo --mode hybrid` + Streamlit  
+- **v0.11**：Photo-Stitch **v4 密度场**（`--density-field`）；双轨计划图/针迹  
+- **v0.11.1（当前）**：v4.1 蛇形串针 + 五官核加密；见 `docs/路线-照片绣PhotoStitch.md`  
 
 ### 结构化针法计划 + DeepSeek
 

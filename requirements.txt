@@ -7,3 +7,4 @@ pytest>=7.4.0
 PyYAML>=6.0
 rembg>=2.0.50
 onnxruntime>=1.16.0
+vtracer>=0.6.0

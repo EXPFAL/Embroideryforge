@@ -12,36 +12,48 @@ from typing import Any
 SCHEMA_VERSION = 1
 PLAN_FILENAME = "stitch_plan.json"
 
-VALID_STITCH = frozenset({"tatami", "running"})
+VALID_STITCH = frozenset({"tatami", "running", "satin"})
 
 # 绣序与默认角度（规则版基线；LLM 可覆盖同名字段）
 DEFAULT_ORDER = [
     "clothes",
+    "hat",
     "hair",
     "skin",
+    "highlight",
     "rose",
+    "lips",
     "patches",
     "eyes",
+    "glasses",
     "leaf",
+    "features",
     "shoes",
     "outline",
 ]
 ANGLE_BY_TAG = {
     "clothes": 0.0,
-    "hair": 40.0,
-    "skin": 90.0,
+    "hat": 32.0,
+    "hair": 58.0,
+    "skin": 18.0,
     "rose": 55.0,
+    "lips": 8.0,
     "patches": 15.0,
-    "eyes": 30.0,
+    "eyes": 25.0,
+    "glasses": 0.0,
     "leaf": 20.0,
+    "highlight": 12.0,
+    "features": 0.0,
     "shoes": 0.0,
     "outline": 0.0,
 }
 
 
 def _default_stitch_for_tag(tag: str, role_hint: str | None = None) -> str:
-    if role_hint == "running_stroke" or tag in {"outline", "shoes"}:
+    if role_hint == "running_stroke" or tag in {"outline", "shoes", "features"}:
         return "running"
+    if role_hint == "satin_or_small_tatami" or tag in {"eyes", "patches", "leaf", "lips", "glasses"}:
+        return "satin"
     return "tatami"
 
 
@@ -53,18 +65,23 @@ QUALITY_PRESETS: dict[str, dict[str, float]] = {
 }
 
 
-def _default_spacing(tag: str, role_hint: str | None, base: float = 2.0) -> float:
+def _default_spacing(tag: str, role_hint: str | None, stitch: str, base: float = 2.0) -> float:
     spacing = base
+    if stitch == "satin":
+        spacing = 1.6
     if role_hint == "satin_or_small_tatami" or tag in {"eyes", "patches", "leaf"}:
-        spacing *= 1.15
+        spacing *= 0.95 if stitch == "satin" else 1.15
     if tag == "rose":
         spacing *= 0.9
     return round(spacing, 3)
 
 
-def _default_stitch_len(tag: str, role_hint: str | None, *, tatami: bool) -> float:
-    if not tatami:
+def _default_stitch_len(tag: str, role_hint: str | None, *, stitch: str) -> float:
+    if stitch == "running":
         return 2.5
+    if stitch == "satin":
+        # satin 用跨宽折返，stitch_len 仅作元数据/质量缩放参考
+        return 2.2
     length = 3.2
     if role_hint == "satin_or_small_tatami" or tag in {"eyes", "patches", "leaf"}:
         length *= 0.85
@@ -80,7 +97,7 @@ def apply_quality(plan: dict[str, Any], quality: str = "standard") -> dict[str, 
     layers: list[dict[str, Any]] = []
     for L in plan.get("layers", []):
         e = dict(L)
-        if e.get("stitch") == "tatami":
+        if e.get("stitch") in {"tatami", "satin"}:
             if e.get("row_spacing_px") is not None:
                 e["row_spacing_px"] = round(float(e["row_spacing_px"]) * preset["spacing_scale"], 3)
             if e.get("stitch_len_px") is not None:
@@ -115,13 +132,20 @@ def build_rules_plan(
             "tag": tag,
             "stitch": stitch,
             "angle_deg": float(ANGLE_BY_TAG.get(tag, 0.0)),
-            "row_spacing_px": _default_spacing(tag, role) if stitch == "tatami" else None,
-            "stitch_len_px": _default_stitch_len(tag, role, tatami=(stitch == "tatami")),
+            "row_spacing_px": (
+                _default_spacing(tag, role, stitch) if stitch in {"tatami", "satin"} else None
+            ),
+            "stitch_len_px": _default_stitch_len(tag, role, stitch=stitch),
             "order": (i + 1) * 10,
             "fill_erode": 0 if stitch == "running" else 1,
             "enabled": True,
             "hex": meta.get("hex", "#808080"),
-            "role_hint": role or ("running_stroke" if stitch == "running" else "tatami_fill"),
+            "role_hint": role
+            or (
+                "running_stroke"
+                if stitch == "running"
+                else ("satin_column" if stitch == "satin" else "tatami_fill")
+            ),
         }
         plan_layers.append(entry)
 

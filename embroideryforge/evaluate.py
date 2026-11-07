@@ -82,9 +82,10 @@ def _color_similarity(
     lab_b = cv2.cvtColor(b, cv2.COLOR_BGR2LAB).astype(np.float32)
     diff = lab_a[mask] - lab_b[mask]
     dist = np.sqrt(np.mean(np.sum(diff * diff, axis=1)))
-    lab_sim = float(max(0.0, min(1.0, 1.0 - dist / 55.0)))
+    # 人像量化后 Lab 距更大，分母略放宽
+    lab_sim = float(max(0.0, min(1.0, 1.0 - dist / 65.0)))
     hist_sim = _hsv_hist_corr(a, b, mask)
-    return float(0.45 * lab_sim + 0.55 * hist_sim)
+    return float(0.40 * lab_sim + 0.60 * hist_sim)
 
 
 def _coverage_ratio(
@@ -139,8 +140,8 @@ def _stitch_quality_score(
         else:
             score += 0.05
     else:
-        # 无对照时：密集档常见 2.5万–9万给高分
-        if 25000 <= stitches <= 90000:
+        # 无对照时：与 dst 合理针数上界对齐（人像 dense 可达十余万）
+        if 25000 <= stitches <= 200_000:
             score += 0.35
         elif 10000 <= stitches < 25000:
             score += 0.2
@@ -305,6 +306,9 @@ def evaluate_export_dir(
     usable = [v for v in scores.values()]
     overall = float(sum(usable) / max(len(usable), 1)) if usable else 0.0
 
+    from embroideryforge.photo_eval import photo_extras
+
+    photo = photo_extras(out_dir)
     result = {
         "out_dir": str(out_dir),
         "overall": round(overall, 3),
@@ -315,6 +319,7 @@ def evaluate_export_dir(
         "checks": checks,
         "plan_source": (plan or {}).get("source") if plan else None,
         "quality": (plan or {}).get("quality") if plan else None,
+        "photo": photo,
     }
     out_file = out_dir / "evaluate_report.json"
     out_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

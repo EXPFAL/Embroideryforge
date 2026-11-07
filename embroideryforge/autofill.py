@@ -1,4 +1,4 @@
-"""从自动分区结果生成多色 DST（Tatami 填针 + Running 描边）。
+"""从自动分区结果生成多色 DST（Tatami / Satin 填针 + Running 描边）。
 
 针法参数以 stitch_plan.json 为准；无计划时用规则版生成后再执行。
 """
@@ -15,6 +15,7 @@ import numpy as np
 from pyembroidery import EmbPattern, write_dst, write_png
 
 from embroideryforge.bg import prepare_subject
+from embroideryforge.efr import write_efr
 from embroideryforge.plan import (
     PLAN_FILENAME,
     apply_quality,
@@ -23,8 +24,9 @@ from embroideryforge.plan import (
     ordered_enabled_layers,
     save_plan,
 )
+from embroideryforge.portrait_style import apply_portrait_msemb_plan, inject_facial_features
 from embroideryforge.preview import render_clean_preview
-from embroideryforge.segment import segment_image
+from embroideryforge.segment import detect_palette_domain, segment_image
 
 
 def _hex_to_rgb_name(hex_color: str) -> str:
@@ -118,6 +120,37 @@ def _running_polylines(mask: np.ndarray, stitch_len: float) -> list[list[tuple[f
     return polylines
 
 
+def _satin_polylines(
+    mask: np.ndarray, angle_deg: float, spacing: float
+) -> list[list[tuple[float, float]]]:
+    """柱状缎面（column satin）：沿角度扫描，每条色带左右缘一针折返。
+
+    适合眼睛、补丁等窄区域；宽区域会形成较长缎面针，仍可检查打开。
+    """
+    h, w = mask.shape
+    cx, cy = w / 2.0, h / 2.0
+    M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
+    rot = cv2.warpAffine(
+        mask, M, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    Minv = cv2.invertAffineTransform(M)
+    polylines: list[list[tuple[float, float]]] = []
+    flip = False
+    y = 0.0
+    while y < h:
+        yi = int(round(y))
+        if 0 <= yi < h:
+            for x0, x1 in _runs_on_row(rot[yi]):
+                if x1 - x0 < 1:
+                    continue
+                a = _map_pt(float(x0), float(yi), Minv)
+                b = _map_pt(float(x1), float(yi), Minv)
+                polylines.append([b, a] if flip else [a, b])
+                flip = not flip
+        y += max(spacing, 0.5)
+    return polylines
+
+
 def _to_emb_xy(x: float, y: float, scale: float, height: int) -> tuple[int, int]:
     return int(round(x * scale)), int(round((height - y) * scale))
 
@@ -151,7 +184,12 @@ def build_pattern_from_plan(
         hex_color = entry.get("hex") or colors.get(tag, "#808080")
         stitch = entry.get("stitch", "tatami")
         angle = float(entry.get("angle_deg", 0.0))
-        fill_erode = int(entry.get("fill_erode", 1 if stitch == "tatami" else 0))
+        fill_erode = int(
+            entry.get(
+                "fill_erode",
+                1 if stitch in {"tatami", "satin"} else 0,
+            )
+        )
 
         mask = np.zeros(label_img.shape, dtype=np.uint8)
         for i in tag_to_ids[tag]:
@@ -159,7 +197,7 @@ def build_pattern_from_plan(
         if not np.any(mask):
             continue
 
-        if stitch == "tatami" and fill_erode > 0:
+        if stitch in {"tatami", "satin"} and fill_erode > 0:
             mask = cv2.erode(mask, erode_k, iterations=fill_erode)
             if not np.any(mask):
                 continue
@@ -167,6 +205,9 @@ def build_pattern_from_plan(
         if stitch == "running":
             stitch_len = float(entry.get("stitch_len_px") or 2.5)
             polys = _running_polylines(mask, stitch_len=stitch_len)
+        elif stitch == "satin":
+            spacing = float(entry.get("row_spacing_px") or 1.6)
+            polys = _satin_polylines(mask, angle_deg=angle, spacing=spacing)
         else:
             spacing = float(entry.get("row_spacing_px") or 2.0)
             stitch_len = float(entry.get("stitch_len_px") or 3.2)
@@ -245,6 +286,9 @@ def run_auto_dst(
     use_llm: bool = False,
     bg_mode: str = "auto",
     quality: str = "dense",
+    domain: str = "auto",
+    use_efr: bool | None = None,
+    efr_colors: int = 7,
 ) -> dict[str, Any]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -262,30 +306,64 @@ def run_auto_dst(
         json.dumps(bg_meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    seg = segment_image(subject_path, mode=mode, k=k, upscale=upscale)
+    resolved_hint = domain if domain in {"chibi", "portrait"} else detect_palette_domain(subject_bgr)
+    # 照片域默认开 EFR；插画默认关
+    efr_on = bool(use_efr) if use_efr is not None else (resolved_hint == "portrait")
+    efr_meta: dict[str, Any] | None = None
+    seg_input = subject_path
+    efr_bgr = None
+    if efr_on:
+        efr_meta = write_efr(subject_bgr, out_dir, n_colors=efr_colors, stem="efr")
+        efr_bgr = efr_meta.pop("image", None)
+        seg_input = out_dir / "efr.png"
+
+    use_upscale = upscale
+    if resolved_hint == "portrait" and upscale > 1:
+        use_upscale = 1
+
+    seg = segment_image(
+        seg_input, mode=mode, k=k, upscale=use_upscale, domain=domain
+    )
     label_img = seg.pop("label_img")
     label_tags = seg.pop("label_tags")
     composite = seg.pop("composite_bgr")
 
+    # 五官必须从去背原图抽暗部；EFR 少色会抹掉眉眼口对比，若用 efr_bgr 会只剩色块
+    if seg.get("domain") == "portrait":
+        label_img, label_tags, seg["layers"] = inject_facial_features(
+            label_img, label_tags, seg["layers"], subject_bgr
+        )
+        if "features" in label_tags:
+            fid = label_tags.index("features")
+            feat_meta = next(L for L in seg["layers"] if L["tag"] == "features")
+            bgr_f = feat_meta.get("bgr") or [40, 40, 40]
+            composite = composite.copy()
+            if composite.shape[:2] == label_img.shape[:2]:
+                composite[label_img == fid] = bgr_f
+
     (out_dir / "layers.svg").write_text(seg["svg"], encoding="utf-8")
     cv2.imwrite(str(out_dir / "layers_composite.png"), composite)
-    # 对照：原图 | 去背主体 | 分层
-    compare = np.hstack(
-        [
-            original,
-            subject_bgr,
-            composite
-            if composite.shape[:2] == original.shape[:2]
-            else cv2.resize(composite, (original.shape[1], original.shape[0]), interpolation=cv2.INTER_NEAREST),
-        ]
-    )
-    cv2.imwrite(str(out_dir / "layers_compare.png"), compare)
+
+    def _fit(img: np.ndarray) -> np.ndarray:
+        if img.shape[:2] == original.shape[:2]:
+            return img
+        return cv2.resize(img, (original.shape[1], original.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    panels = [original, _fit(subject_bgr)]
+    if efr_bgr is not None:
+        panels.append(_fit(efr_bgr))
+    panels.append(_fit(composite))
+    cv2.imwrite(str(out_dir / "layers_compare.png"), np.hstack(panels))
     layers_payload = {key: val for key, val in seg.items() if key != "svg"}
     layers_payload["svg_file"] = "layers.svg"
     layers_payload["composite"] = "layers_composite.png"
     layers_payload["subject"] = subject_path.name
     layers_payload["subject_mask"] = mask_path.name
     layers_payload["bg"] = bg_meta
+    layers_payload["domain"] = seg.get("domain", domain)
+    layers_payload["efr"] = bool(efr_on)
+    if efr_meta:
+        layers_payload["efr_meta"] = {k: v for k, v in efr_meta.items() if k != "image"}
     (out_dir / "layers.json").write_text(
         json.dumps(layers_payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -312,6 +390,8 @@ def run_auto_dst(
             source="rules",
             quality=quality,
         )
+    if seg.get("domain") == "portrait":
+        plan = apply_portrait_msemb_plan(plan)
     plan_to_save = {k: v for k, v in plan.items()}
     plan_file = save_plan(plan_to_save, out_dir / PLAN_FILENAME)
 
@@ -351,6 +431,9 @@ def run_auto_dst(
         "plan": plan_file.name,
         "quality": plan.get("quality", quality),
         "bg": bg_meta,
+        "domain": layers_payload.get("domain"),
+        "efr": bool(efr_on),
+        "efr_meta": layers_payload.get("efr_meta"),
         **meta,
     }
     (out_dir / "auto_stitch_report.json").write_text(
@@ -364,4 +447,5 @@ def run_auto_dst(
         "plan": plan_file,
         "report": report,
         "preview_info": preview_info,
+        "efr": efr_on,
     }

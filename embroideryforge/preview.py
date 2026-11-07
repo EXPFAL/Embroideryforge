@@ -70,6 +70,17 @@ def resolve_colors(
     return [(80, 80, 80)]
 
 
+def _auto_stroke_width(seg_lens: list[float], *, thick: bool) -> int:
+    """按中位针距估线宽；thick 用于缩略图成团（假厚）。"""
+    if not seg_lens:
+        return 3 if thick else 1
+    med = float(np.median(np.asarray(seg_lens, dtype=np.float32)))
+    if thick:
+        # 假厚封顶宜保守；过粗会把色边界糊成马赛克墙
+        return int(np.clip(round(med * 0.75), 2, 4))
+    return int(np.clip(round(med * 0.35), 1, 3))
+
+
 def render_clean_preview(
     pattern_or_dst: EmbPattern | str | Path,
     out_path: str | Path,
@@ -80,8 +91,13 @@ def render_clean_preview(
     plan_path: str | Path | None = None,
     pad: int = 40,
     background: tuple[int, int, int] = (255, 255, 255),
+    stroke_width: int | None = None,
+    thick: bool = False,
 ) -> dict[str, Any]:
-    """只画 STITCH；JUMP / COLOR_CHANGE 断笔。颜色来自旁路色表。"""
+    """只画 STITCH；JUMP / COLOR_CHANGE 断笔。颜色来自旁路色表。
+
+    thick=True 或更大的 stroke_width：预览假厚（不改变 DST），缩略图更成团。
+    """
     if isinstance(pattern_or_dst, EmbPattern):
         pattern = pattern_or_dst
     else:
@@ -113,7 +129,22 @@ def render_clean_preview(
     miny, maxy = min(ys), max(ys)
     w = int(maxx - minx) + 2 * pad
     h = int(maxy - miny) + 2 * pad
-    canvas = np.full((h, w, 3), background, dtype=np.uint8)
+    # 假厚预览 2× 超采样再缩小，减轻色块锯齿/马赛克感
+    scale_up = 2 if thick else 1
+    canvas = np.full((h * scale_up, w * scale_up, 3), background, dtype=np.uint8)
+
+    # 先扫一遍估针距
+    seg_lens: list[float] = []
+    last_pt = None
+    for x, y, cmd in stitches:
+        if cmd in {COLOR_CHANGE, JUMP} or cmd != STITCH:
+            last_pt = None
+            continue
+        if last_pt is not None:
+            seg_lens.append(float(np.hypot(x - last_pt[0], y - last_pt[1])))
+        last_pt = (x, y)
+    width = stroke_width if stroke_width is not None else _auto_stroke_width(seg_lens, thick=thick)
+    draw_w = max(1, width * scale_up)
 
     color_i = 0
     last = None
@@ -129,13 +160,18 @@ def render_clean_preview(
         if cmd != STITCH:
             last = None
             continue
-        px = int(x - minx + pad)
-        py = int(maxy - y + pad)  # 绣框 Y 向上 → 图像 Y 向下
+        px = int((x - minx + pad) * scale_up)
+        py = int((maxy - y + pad) * scale_up)
         color = palette[color_i % len(palette)]
         if last is not None:
-            cv2.line(canvas, last, (px, py), color, 1, cv2.LINE_AA)
+            cv2.line(canvas, last, (px, py), color, draw_w, cv2.LINE_AA)
+            if draw_w >= 3:
+                cv2.circle(canvas, (px, py), max(1, draw_w // 2), color, -1, cv2.LINE_AA)
         last = (px, py)
         stitch_n += 1
+
+    if scale_up > 1:
+        canvas = cv2.resize(canvas, (w, h), interpolation=cv2.INTER_AREA)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,4 +182,6 @@ def render_clean_preview(
         "out": str(out_path),
         "colors_bgr": [list(c) for c in palette],
         "n_colors": len(palette),
+        "stroke_width": width,
+        "thick": bool(thick),
     }

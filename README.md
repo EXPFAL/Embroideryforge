@@ -23,6 +23,8 @@ pip install -r requirements.txt
 copy .env.example .env
 python -m pytest -q
 python -m embroideryforge stitch-auto samples\golden-chibi.jpg --out exports\smoke --llm --quality dense
+python -m embroideryforge vectorize samples\golden-chibi.jpg --out exports\vectorize_chibi
+python -m streamlit run app\streamlit_app.py
 ```
 
 ## 结构
