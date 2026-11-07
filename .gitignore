@@ -11,3 +11,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+models/*.task
+models/*.task.download
+!models/README.md

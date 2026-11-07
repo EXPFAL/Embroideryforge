@@ -91,11 +91,17 @@ def _name_center_portrait(
 
     if vv <= 38:
         return "outline"
+    # 领章/徽章：高饱和红（先于发/衣，避免并进 hair）
+    if (hh <= 10 or hh >= 170) and ss >= 90 and 70 <= vv <= 210:
+        return "accent"
     # 深褐/黑发（先于唇，避免大块阴影被标 lips）
     if vv <= 100 and ss <= 80:
         return "hair"
     # 亮黄外套
     if 18 <= hh <= 45 and ss >= 70 and vv >= 90:
+        return "clothes"
+    # 灰/蓝灰军装等低饱和中亮衣（人物+服饰主场景）
+    if ss <= 55 and 55 <= vv <= 200 and not (3 <= hh <= 32 and ss >= 18 and vv >= 130):
         return "clothes"
     # 卡其/褐黄帽：中饱和褐，面积通常大于唇
     if 5 <= hh <= 30 and 25 <= ss <= 110 and 70 <= vv <= 195:
@@ -418,6 +424,7 @@ def segment_image(
         "skin": 30,
         "rose": 35,
         "lips": 38,
+        "accent": 42,
         "patches": 40,
         "eyes": 50,
         "glasses": 52,

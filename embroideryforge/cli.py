@@ -112,7 +112,17 @@ def main(argv: list[str] | None = None) -> int:
     p_ps.add_argument(
         "--density-field",
         action="store_true",
-        help="v4 密度场短针（脸暗密亮疏+Bayer；双轨计划图/针迹）",
+        help="密度场短针；近脸默认 v4.1.1，半身自动 V6 unified",
+    )
+    p_ps.add_argument(
+        "--density-unified",
+        action="store_true",
+        help="强制 V6 整主体统一彩色密度（无衣 tatami/叠针）",
+    )
+    p_ps.add_argument(
+        "--no-density-unified",
+        action="store_true",
+        help="强制 v4.1.1（禁止半身自动切 V6）",
     )
 
     p_vec = sub.add_parser("vectorize", help="VTracer 位图→SVG 旁路（不替代 stitch-auto）")
@@ -236,10 +246,16 @@ def main(argv: list[str] | None = None) -> int:
         mode = args.mode
         if args.full_frame or args.no_face_roi:
             mode = "full"
-        if args.density_field:
-            from embroideryforge.density_field import run_density_v4
+        if args.density_field or args.density_unified:
+            from embroideryforge.density_field import run_density_photo
 
-            result = run_density_v4(
+            if args.density_unified:
+                unified: bool | None = True
+            elif args.no_density_unified:
+                unified = False
+            else:
+                unified = None  # 半身自动 V6
+            result = run_density_photo(
                 args.image,
                 args.out,
                 n_colors=args.colors,
@@ -247,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_height_mm=args.height_mm,
                 bg_mode=args.bg,
                 hybrid_body=mode != "face",
+                unified=unified,
             )
         else:
             result = run_photo_stitch(

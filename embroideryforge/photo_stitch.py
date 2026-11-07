@@ -56,8 +56,8 @@ def _bgr_to_hex(bgr: np.ndarray | list[int]) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def detect_face_roi(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """返回 (x, y, w, h)；失败则 None。"""
+def detect_face_roi_haar(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Haar 回退：返回 (x, y, w, h)；失败则 None。"""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
     if not cascade_path.is_file():
@@ -66,14 +66,50 @@ def detect_face_roi(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
     faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
     if len(faces) == 0:
         return None
-    # 取最大脸并外扩
+    # 取最大脸并外扩；下缘多留下巴/下颚，避免与 body 层撕开
     x, y, w, h = max(faces, key=lambda f: int(f[2]) * int(f[3]))
-    pad_x, pad_y = int(w * 0.35), int(h * 0.45)
+    pad_x, pad_top = int(w * 0.38), int(h * 0.48)
+    pad_bot = int(h * 0.95)  # Haar 框常切在嘴下，需明显下扩
     x0 = max(0, x - pad_x)
-    y0 = max(0, y - pad_y)
+    y0 = max(0, y - pad_top)
     x1 = min(bgr.shape[1], x + w + pad_x)
-    y1 = min(bgr.shape[0], y + h + int(pad_y * 0.6))
+    y1 = min(bgr.shape[0], y + h + pad_bot)
     return x0, y0, x1 - x0, y1 - y0
+
+
+def detect_face_geometry(
+    bgr: np.ndarray,
+    subject_mask: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """优先 MediaPipe 关键点；失败回退 Haar + 下巴精炼。
+
+    返回 dict: roi (x,y,w,h), landmarks (Nx2|None), source (mediapipe|haar|bust)
+    """
+    from embroideryforge.face_detect import detect_face_roi_mediapipe
+
+    mp = detect_face_roi_mediapipe(bgr)
+    if mp is not None:
+        roi, pts = mp
+        # MediaPipe 关键点已含下巴：禁止按主体 0.9 下拉 ROI（会吞发/肩进脸罩）
+        return {"roi": roi, "landmarks": pts, "source": "mediapipe"}
+
+    haar = detect_face_roi_haar(bgr)
+    if haar is not None:
+        roi = haar
+        if subject_mask is not None:
+            roi = refine_face_roi_to_chin(roi, subject_mask, chin_frac=0.88)
+        return {"roi": roi, "landmarks": None, "source": "haar"}
+
+    roi = _default_bust_roi(bgr)
+    if subject_mask is not None:
+        roi = refine_face_roi_to_chin(roi, subject_mask, chin_frac=0.88)
+    return {"roi": roi, "landmarks": None, "source": "bust"}
+
+
+def detect_face_roi(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
+    """兼容旧接口：返回 (x, y, w, h)；几何失败则 None（极少）。"""
+    geo = detect_face_geometry(bgr, subject_mask=None)
+    return geo.get("roi")
 
 
 def _default_bust_roi(bgr: np.ndarray) -> tuple[int, int, int, int]:
@@ -82,6 +118,27 @@ def _default_bust_roi(bgr: np.ndarray) -> tuple[int, int, int, int]:
     x0, y0 = int(w * 0.15), int(h * 0.02)
     x1, y1 = int(w * 0.85), int(h * 0.72)
     return x0, y0, x1 - x0, y1 - y0
+
+
+def refine_face_roi_to_chin(
+    roi: tuple[int, int, int, int],
+    subject_mask: np.ndarray,
+    *,
+    chin_frac: float = 0.88,
+) -> tuple[int, int, int, int]:
+    """按主体轮廓把脸窗下缘拉到下巴附近，避免 Haar 切在嘴上导致下颚进 body。"""
+    x, y, w, h = roi
+    ys, xs = np.where(subject_mask > 0)
+    if len(ys) < 80:
+        return roi
+    sy0, sy1 = int(ys.min()), int(ys.max())
+    sx0, sx1 = int(xs.min()), int(xs.max())
+    chin_y = sy0 + int((sy1 - sy0) * chin_frac)
+    y1 = max(y + h, chin_y)
+    y1 = min(y1, subject_mask.shape[0])
+    x0 = min(x, max(0, sx0 - 4))
+    x1 = max(x + w, min(subject_mask.shape[1], sx1 + 4))
+    return int(x0), int(y), int(x1 - x0), int(y1 - y)
 
 
 def resize_for_resolution(
@@ -111,7 +168,7 @@ def quantize_tones(
         flat = np.full_like(bgr, 255)
         return flat, np.full(bgr.shape[:2], -1, dtype=np.int32), []
 
-    src = cv2.bilateralFilter(bgr, 5, 40, 40) if pre_smooth else bgr
+    src = cv2.bilateralFilter(bgr, 7, 55, 55) if pre_smooth else bgr
     lab = cv2.cvtColor(src, cv2.COLOR_BGR2LAB).astype(np.float32)
     samples = lab[fg]
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.5)
@@ -578,6 +635,21 @@ def emit_dark_features(
     return pattern, layers, first, feat
 
 
+def _scale_landmarks(
+    points: np.ndarray | None,
+    src_shape: tuple[int, int],
+    dst_shape: tuple[int, int],
+) -> np.ndarray | None:
+    if points is None or len(points) == 0:
+        return None
+    sy = dst_shape[0] / max(src_shape[0], 1)
+    sx = dst_shape[1] / max(src_shape[1], 1)
+    out = np.asarray(points, dtype=np.float32).copy()
+    out[:, 0] *= sx
+    out[:, 1] *= sy
+    return out
+
+
 def _scale_roi(
     roi: tuple[int, int, int, int], src_shape: tuple[int, int], dst_shape: tuple[int, int]
 ) -> tuple[int, int, int, int]:
@@ -591,14 +663,38 @@ def _scale_roi(
     return x2, y2, w2, h2
 
 
-def _face_mask(shape: tuple[int, int], roi: tuple[int, int, int, int]) -> np.ndarray:
-    """脸窗：覆盖五官主体，略避手部即可（过紧会丢腮/颧信息）。"""
+def _face_mask(
+    shape: tuple[int, int],
+    roi: tuple[int, int, int, int],
+    subject_mask: np.ndarray | None = None,
+    landmarks: np.ndarray | None = None,
+) -> np.ndarray:
+    """优先关键点凸包脸罩；否则椭圆 + ROI∩主体下半并集。"""
+    if landmarks is not None and len(landmarks) >= 50:
+        from embroideryforge.face_detect import face_mask_from_landmarks
+
+        return face_mask_from_landmarks(
+            shape, landmarks, subject_mask=subject_mask, roi=roi
+        )
+
     h, w = shape
     x, y, rw, rh = roi
     mask = np.zeros((h, w), dtype=np.uint8)
-    cx, cy = x + rw // 2, y + int(rh * 0.45)
-    axes = (max(1, int(rw * 0.40)), max(1, int(rh * 0.46)))
+    cx, cy = x + rw // 2, y + int(rh * 0.55)
+    axes = (max(1, int(rw * 0.48)), max(1, int(rh * 0.62)))
     cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    if subject_mask is not None and subject_mask.shape[:2] == (h, w):
+        # ROI 矩形内、椭圆中心以下的主体像素并入脸罩（下巴/下颚）
+        rect = np.zeros((h, w), dtype=np.uint8)
+        y1 = min(h, y + rh)
+        x1 = min(w, x + rw)
+        rect[max(0, y) : y1, max(0, x) : x1] = 255
+        below = np.zeros((h, w), dtype=np.uint8)
+        below[cy:, :] = 255
+        chin = cv2.bitwise_and(subject_mask, rect)
+        chin = cv2.bitwise_and(chin, below)
+        mask = cv2.bitwise_or(mask, chin)
+        mask = cv2.bitwise_and(mask, subject_mask)
     return mask
 
 
@@ -658,10 +754,16 @@ def run_photo_stitch(
     if poster:
         spacing *= 0.70
         stitch_len *= 1.05
-    roi_src = detect_face_roi(subject_bgr) or _default_bust_roi(subject_bgr)
+    geo = detect_face_geometry(subject_bgr, subject_mask=subject_mask)
+    roi_src = geo["roi"]
+    face_landmarks_src = geo.get("landmarks")
+    face_source = geo.get("source", "unknown")
     boxed = subject_bgr.copy()
     x0, y0, w0, h0 = roi_src
     cv2.rectangle(boxed, (x0, y0), (x0 + w0, y0 + h0), (0, 180, 255), 2)
+    if face_landmarks_src is not None:
+        for px, py in face_landmarks_src[::8]:
+            cv2.circle(boxed, (int(px), int(py)), 1, (80, 220, 80), -1)
     cv2.imwrite(str(out_dir / "roi_box.png"), boxed)
 
     layers: list[dict[str, Any]] = []
@@ -680,9 +782,10 @@ def run_photo_stitch(
         )
         work_mask_r = _strip_fringe_white(work_r, work_mask_r)
         roi = _scale_roi(roi_src, subject_bgr.shape[:2], work_r.shape[:2])
-        face_m = _face_mask(work_r.shape[:2], roi)
+        lm_r = _scale_landmarks(face_landmarks_src, subject_bgr.shape[:2], work_r.shape[:2])
+        face_m = _face_mask(work_r.shape[:2], roi, subject_mask=work_mask_r, landmarks=lm_r)
         face_m = cv2.bitwise_and(face_m, work_mask_r)
-        face_dil = cv2.dilate(face_m, np.ones((9, 9), np.uint8), iterations=2)
+        face_dil = cv2.dilate(face_m, np.ones((5, 5), np.uint8), iterations=1)
 
         seg = segment_image(subject_path, mode="palette", k=max(8, n_colors), upscale=1, domain="portrait")
         label_img = seg["label_img"]
@@ -822,7 +925,11 @@ def run_photo_stitch(
         cv2.imwrite(str(out_dir / "density_preview.png"), dens)
         work_r_for_compare = work_r
         tone_for_compare = tone
-        roi_meta = {"mode": "hybrid", "xywh": [int(x0), int(y0), int(w0), int(h0)]}
+        roi_meta = {
+            "mode": "hybrid",
+            "xywh": [int(x0), int(y0), int(w0), int(h0)],
+            "detector": face_source,
+        }
 
     else:
         # face / full
@@ -834,7 +941,11 @@ def run_photo_stitch(
             x, y, w, h = roi_src
             work = subject_bgr[y : y + h, x : x + w].copy()
             work_mask = subject_mask[y : y + h, x : x + w].copy()
-            roi_meta = {"mode": "face_or_bust", "xywh": [int(x), int(y), int(w), int(h)]}
+            roi_meta = {
+                "mode": "face_or_bust",
+                "xywh": [int(x), int(y), int(w), int(h)],
+                "detector": face_source,
+            }
 
         work_r, resize_scale = resize_for_resolution(
             work, resolution, max_side=int(cfg["max_side"])
@@ -967,6 +1078,7 @@ def run_photo_stitch(
         "stitch_len_px": stitch_len,
         "resize_scale": resize_scale,
         "roi": roi_meta,
+        "face_detect": {"source": face_source, "mediapipe": face_source == "mediapipe"},
         "bg": bg_meta,
         "palette": palette,
         "layers": layers,

@@ -201,6 +201,10 @@ python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports
 python -m embroideryforge stitch-photo samples\test_meme_portrait.jpg --out exports\photo_stitch_exp\meme_v4 --mode hybrid --density-field --colors 10 --resolution high --bg auto
 ```
 
+### 脸窗识别 — MediaPipe Face Landmarker
+
+Haar 框常切在嘴下导致下颚进 body。现优先 **MediaPipe** 关键点定 ROI/凸包脸罩（[`embroideryforge/face_detect.py`](../embroideryforge/face_detect.py)），失败回退 Haar + `refine_face_roi_to_chin`。模型见 `models/README.md`。
+
 ### V4.1 — 蛇形串针 + 五官核
 
 在 v4 密度场上减 JUMP、加五官细节：
@@ -214,3 +218,41 @@ python -m embroideryforge stitch-photo samples\test_meme_portrait.jpg --out expo
 python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports\photo_stitch_exp\portrait_v41 --mode hybrid --density-field --colors 10 --resolution high --bg auto
 python -m embroideryforge stitch-photo samples\test_meme_portrait.jpg --out exports\photo_stitch_exp\meme_v41 --mode hybrid --density-field --colors 10 --resolution high --bg auto
 ```
+
+### V4.2 — 高光保点 + 五官结构针（已回退）
+
+试过在 v4.1.1 上叠结构 satin/running + 高光抠空，**面部观感明显差于 v41**（眼窝易涂黑、层次被破坏）。代码留作实验函数，**默认管线不启用**；对照产物可保留 `portrait_v42` / `meme_v42` 作反例。
+
+当前推荐仍用 v4.1.1：
+
+```powershell
+python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports\photo_stitch_exp\portrait_v41 --mode hybrid --density-field --colors 10 --resolution high --bg auto
+```
+
+### P4 / V5 — 人物 hybrid + 叠针（已失败 / 回退）
+
+试过：脸密度 + 衣 tatami 多带 + `clothes_fold` / 指骨 / 道具轮廓 running。  
+**结果**：服装出现怪异飞丝，手/枪仍糊。`figure_uniform_v5` 可留作反例。叠针默认已关。
+
+### P4 / V6 — 整主体统一 Color PhotoStitch（当前人物+服饰主路线）
+
+对齐 Wilcom Color PhotoStitch：**整 `subject_mask` 同一套多色密度蛇形短针**，不再 body tatami、不再 fold/指骨/道具轮廓叠针。
+
+| 项 | 策略 |
+|----|------|
+| 密度罩 | `dens_mask = subject_mask` |
+| 脸/手 | MediaPipe 仅作软权重（局部更密）；不发射结构层 |
+| 衣褶/枪形 | 靠亮度→针密自然形成 |
+| 引擎 | `photo_stitch_density_v6` |
+| 近脸图 | 仍默认 `photo_stitch_density_v4_1` |
+
+```powershell
+# 强制 V6
+python -m embroideryforge stitch-photo samples\test_figure_uniform.jpg --out exports\photo_stitch_exp\figure_uniform_v6 --mode hybrid --density-unified --colors 11 --resolution high --bg auto
+# 半身自动 V6（--density-field 且 face_frac<0.45）
+python -m embroideryforge stitch-photo samples\test_figure_uniform.jpg --out exports\photo_stitch_exp\figure_uniform_v6 --mode hybrid --density-field --colors 11 --resolution high --bg auto
+# 强制留在 v4.1.1
+python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports\photo_stitch_exp\portrait_v41 --mode hybrid --density-field --no-density-unified --colors 10 --resolution high --bg auto
+```
+
+**非主张**：不引入 SegFormer/Torch；不把 nuizu/OpenStitch 嵌进主链。

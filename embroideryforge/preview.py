@@ -70,6 +70,11 @@ def resolve_colors(
     return [(80, 80, 80)]
 
 
+# 预览底色：白底易放大行间空隙；深色绣布更接近机绣观感
+PREVIEW_BG_WHITE = (255, 255, 255)
+PREVIEW_BG_DARK = (22, 22, 26)
+
+
 def _auto_stroke_width(seg_lens: list[float], *, thick: bool) -> int:
     """按中位针距估线宽；thick 用于缩略图成团（假厚）。"""
     if not seg_lens:

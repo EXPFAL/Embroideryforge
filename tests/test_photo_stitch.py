@@ -1,11 +1,21 @@
 from pathlib import Path
 
-from embroideryforge.photo_stitch import quantize_tones, run_photo_stitch
+from embroideryforge.photo_stitch import _face_mask, quantize_tones, run_photo_stitch
 import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTRAIT = ROOT / "samples" / "golden-portrait.jpg"
+NEW_PORTRAIT = ROOT / "samples" / "test_portrait_new.jpg"
+
+
+def test_face_mask_covers_lower_roi():
+    # 椭圆应盖到 ROI 下部（下颚区），避免脸-颈断层
+    roi = (10, 10, 100, 120)
+    m = _face_mask((200, 200), roi)
+    x, y, rw, rh = roi
+    lower = m[y + int(rh * 0.75) : y + rh, x : x + rw]
+    assert int(np.count_nonzero(lower)) > 50
 
 
 def test_quantize_tones_basic():

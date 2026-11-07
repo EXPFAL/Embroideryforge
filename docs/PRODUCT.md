@@ -31,7 +31,9 @@
 - v0.9：`stitch-photo` P1（脸 ROI 色调短填）  
 - v0.10：`stitch-photo --mode hybrid` + Streamlit  
 - **v0.11**：Photo-Stitch **v4 密度场**（`--density-field`）；双轨计划图/针迹  
-- **v0.11.1（当前）**：v4.1 蛇形串针 + 五官核加密；见 `docs/路线-照片绣PhotoStitch.md`  
+- **v0.11.1 / v0.12**：Photo-Stitch **v4.1.1** 为密度场默认；v4.2 结构针/高光抠空已回退（观感差于 v41）
+- **v0.13**：人物+服饰 V5 hybrid+叠针（已失败回退）
+- **v0.14（当前）**：人物+服饰 **V6 整主体统一密度**（`--density-unified` / 半身自动）；近脸仍 v4.1.1；见 `docs/路线-照片绣PhotoStitch.md`  
 
 ### 结构化针法计划 + DeepSeek
 

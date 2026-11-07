@@ -8,3 +8,4 @@ PyYAML>=6.0
 rembg>=2.0.50
 onnxruntime>=1.16.0
 vtracer>=0.6.0
+mediapipe>=0.10.14
