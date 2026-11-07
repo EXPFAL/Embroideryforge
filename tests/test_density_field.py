@@ -121,6 +121,45 @@ def test_chroma_accent_picks_red():
     assert int(np.count_nonzero(acc[8:18, 8:22])) > 10
 
 
+def test_quantize_tones_hue_bands_keeps_cool():
+    import cv2
+    from embroideryforge.photo_stitch import quantize_tones_hue_bands
+
+    img = np.full((80, 80, 3), (40, 50, 90), dtype=np.uint8)  # 暖褐肤
+    img[20:60, 10:35] = (70, 140, 60)  # BGR 青绿衣
+    mask = np.full((80, 80), 255, dtype=np.uint8)
+    _tone, _labels, centers = quantize_tones_hue_bands(img, mask, n_colors=10)
+    cool_ok = False
+    for c in centers:
+        hsv = cv2.cvtColor(np.asarray(c, dtype=np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2HSV).reshape(3)
+        if 35 <= int(hsv[0]) <= 100 and int(hsv[1]) >= 20:
+            cool_ok = True
+            break
+    assert cool_ok, "hue-band should reserve a cool (green/cyan) center"
+
+
+def test_quantize_tones_flatten_keeps_cool_and_red():
+    import cv2
+    from embroideryforge.photo_stitch import quantize_tones_flatten
+
+    img = np.full((100, 100, 3), (40, 50, 90), dtype=np.uint8)  # 暖褐肤
+    img[15:70, 8:40] = (70, 140, 60)  # 青绿衣
+    img[10:90, 85:95] = (40, 40, 200)  # 红条（强调色）
+    mask = np.full((100, 100), 255, dtype=np.uint8)
+    _tone, _labels, centers = quantize_tones_flatten(img, mask, n_colors=10)
+    cool_ok = False
+    red_ok = False
+    for c in centers:
+        hsv = cv2.cvtColor(np.asarray(c, dtype=np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2HSV).reshape(3)
+        H, S = int(hsv[0]), int(hsv[1])
+        if 35 <= H <= 100 and S >= 18:
+            cool_ok = True
+        if (H <= 12 or H >= 160) and S >= 40:
+            red_ok = True
+    assert cool_ok, "flatten should keep a cool (green/cyan) center"
+    assert red_ok, "flatten should keep a vivid red/warm accent center"
+
+
 def test_build_figure_regions_keys():
     img = np.full((60, 60, 3), 100, dtype=np.uint8)
     img[5:25, 20:40] = (90, 140, 190)

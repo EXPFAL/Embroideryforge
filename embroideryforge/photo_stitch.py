@@ -56,25 +56,38 @@ def _bgr_to_hex(bgr: np.ndarray | list[int]) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def detect_face_roi_haar(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """Haar 回退：返回 (x, y, w, h)；失败则 None。"""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-    if not cascade_path.is_file():
-        return None
-    cascade = cv2.CascadeClassifier(str(cascade_path))
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
-    if len(faces) == 0:
-        return None
-    # 取最大脸并外扩；下缘多留下巴/下颚，避免与 body 层撕开
-    x, y, w, h = max(faces, key=lambda f: int(f[2]) * int(f[3]))
+def _haar_pad_roi(
+    x: int, y: int, w: int, h: int, shape: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    hh, ww = shape
     pad_x, pad_top = int(w * 0.38), int(h * 0.48)
     pad_bot = int(h * 0.95)  # Haar 框常切在嘴下，需明显下扩
     x0 = max(0, x - pad_x)
     y0 = max(0, y - pad_top)
-    x1 = min(bgr.shape[1], x + w + pad_x)
-    y1 = min(bgr.shape[0], y + h + pad_bot)
+    x1 = min(ww, x + w + pad_x)
+    y1 = min(hh, y + h + pad_bot)
     return x0, y0, x1 - x0, y1 - y0
+
+
+def detect_all_face_rois_haar(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Haar 多脸 ROI（已外扩），面积大→小。"""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    if not cascade_path.is_file():
+        return []
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=4, minSize=(40, 40))
+    if len(faces) == 0:
+        return []
+    rois = [_haar_pad_roi(int(x), int(y), int(w), int(h), bgr.shape[:2]) for x, y, w, h in faces]
+    rois.sort(key=lambda r: int(r[2]) * int(r[3]), reverse=True)
+    return rois
+
+
+def detect_face_roi_haar(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Haar 回退：返回 (x, y, w, h)；失败则 None。"""
+    rois = detect_all_face_rois_haar(bgr)
+    return rois[0] if rois else None
 
 
 def detect_face_geometry(
@@ -83,27 +96,97 @@ def detect_face_geometry(
 ) -> dict[str, Any]:
     """优先 MediaPipe 关键点；失败回退 Haar + 下巴精炼。
 
-    返回 dict: roi (x,y,w,h), landmarks (Nx2|None), source (mediapipe|haar|bust)
+    返回 dict: roi, landmarks（主脸）, all_landmarks（多脸）, n_faces, source
     """
-    from embroideryforge.face_detect import detect_face_roi_mediapipe
+    from embroideryforge.face_detect import (
+        detect_all_face_landmarks,
+        detect_face_roi_mediapipe,
+        roi_from_landmarks,
+    )
 
-    mp = detect_face_roi_mediapipe(bgr)
-    if mp is not None:
-        roi, pts = mp
+    all_pts = detect_all_face_landmarks(bgr)
+    if all_pts:
+        pts = all_pts[0]
+        roi = roi_from_landmarks(pts, bgr.shape[:2])
         # MediaPipe 关键点已含下巴：禁止按主体 0.9 下拉 ROI（会吞发/肩进脸罩）
-        return {"roi": roi, "landmarks": pts, "source": "mediapipe"}
+        return {
+            "roi": roi,
+            "landmarks": pts,
+            "all_landmarks": all_pts,
+            "n_faces": len(all_pts),
+            "source": "mediapipe",
+        }
+
+    # 宽檐帽等：去掉 person 顶冠后再跑一次 MediaPipe
+    if subject_mask is not None and subject_mask.shape[:2] == bgr.shape[:2]:
+        ys, xs = np.where(subject_mask > 0)
+        if len(ys) >= 80:
+            y0, y1 = int(ys.min()), int(ys.max())
+            x0, x1 = int(xs.min()), int(xs.max())
+            ph = max(1, y1 - y0 + 1)
+            skip = max(4, int(ph * 0.18))
+            crop = bgr[y0 + skip : y1 + 1, x0 : x1 + 1].copy()
+            crop_m = subject_mask[y0 + skip : y1 + 1, x0 : x1 + 1]
+            if crop.size > 0 and int(np.count_nonzero(crop_m)) >= 60:
+                # 非主体填中灰，减少背景干扰
+                crop = np.where(crop_m[..., None] > 0, crop, 128).astype(np.uint8)
+                all_c = detect_all_face_landmarks(crop)
+                if all_c:
+                    ox, oy = x0, y0 + skip
+                    shifted: list[np.ndarray] = []
+                    for pts_c in all_c:
+                        pts = pts_c.copy()
+                        pts[:, 0] += ox
+                        pts[:, 1] += oy
+                        shifted.append(pts)
+                    pts0 = shifted[0]
+                    rx, ry, rw, rh = roi_from_landmarks(pts0, bgr.shape[:2])
+                    return {
+                        "roi": (rx, ry, rw, rh),
+                        "landmarks": pts0,
+                        "all_landmarks": shifted,
+                        "n_faces": len(shifted),
+                        "source": "mediapipe",
+                    }
+                mp2 = detect_face_roi_mediapipe(crop)
+                if mp2 is not None:
+                    roi_c, pts_c = mp2
+                    ox, oy = x0, y0 + skip
+                    rx, ry, rw, rh = roi_c
+                    pts = pts_c.copy()
+                    pts[:, 0] += ox
+                    pts[:, 1] += oy
+                    return {
+                        "roi": (rx + ox, ry + oy, rw, rh),
+                        "landmarks": pts,
+                        "all_landmarks": [pts],
+                        "n_faces": 1,
+                        "source": "mediapipe",
+                    }
 
     haar = detect_face_roi_haar(bgr)
     if haar is not None:
         roi = haar
         if subject_mask is not None:
             roi = refine_face_roi_to_chin(roi, subject_mask, chin_frac=0.88)
-        return {"roi": roi, "landmarks": None, "source": "haar"}
+        return {
+            "roi": roi,
+            "landmarks": None,
+            "all_landmarks": [],
+            "n_faces": 1,
+            "source": "haar",
+        }
 
     roi = _default_bust_roi(bgr)
     if subject_mask is not None:
         roi = refine_face_roi_to_chin(roi, subject_mask, chin_frac=0.88)
-    return {"roi": roi, "landmarks": None, "source": "bust"}
+    return {
+        "roi": roi,
+        "landmarks": None,
+        "all_landmarks": [],
+        "n_faces": 0,
+        "source": "bust",
+    }
 
 
 def detect_face_roi(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -221,6 +304,451 @@ def quantize_tones(
     for i, c in enumerate(centers_bgr):
         tone[label_map == i] = c
     return tone, label_map, [centers_bgr[i] for i in range(len(centers_bgr))]
+
+
+def _lab_dist2(a: np.ndarray, b: np.ndarray, ab_weight: float = 1.0) -> np.ndarray:
+    """色度加权 Lab 平方距；ab_weight>1 减轻青绿/红贴到褐灰。"""
+    w = float(ab_weight)
+    d = a - b
+    if d.ndim == 1:
+        return d[0] * d[0] + w * (d[1] * d[1] + d[2] * d[2])
+    return d[..., 0] ** 2 + w * (d[..., 1] ** 2 + d[..., 2] ** 2)
+
+
+def _assign_lab_chroma(
+    samples: np.ndarray,
+    centers: np.ndarray,
+    *,
+    ab_weight: float,
+    chunk: int = 60_000,
+) -> np.ndarray:
+    labels = np.empty(len(samples), dtype=np.int32)
+    C = centers.astype(np.float32)
+    w = float(ab_weight)
+    for i0 in range(0, len(samples), chunk):
+        sl = samples[i0 : i0 + chunk]
+        dL = sl[:, None, 0] - C[None, :, 0]
+        da = sl[:, None, 1] - C[None, :, 1]
+        db = sl[:, None, 2] - C[None, :, 2]
+        d2 = dL * dL + w * (da * da + db * db)
+        labels[i0 : i0 + chunk] = d2.argmin(axis=1).astype(np.int32)
+    return labels
+
+
+def quantize_tones_flatten(
+    bgr: np.ndarray,
+    mask: np.ndarray,
+    n_colors: int = 12,
+    *,
+    pre_smooth: bool = False,
+    dampen_warm_skin: bool = False,
+    over_k: int = 28,
+    min_area_frac: float = 0.008,
+    protect_area_frac: float = 0.05,
+    protect_chroma: float = 16.0,
+    ab_weight: float = 2.05,
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+    """V6.6 Wilcom 式压平色板：过量化 → 小面积并入 → 高面积/高色度保底 → 合并到 n_colors。
+
+    不做 HSV 硬桶、不做标签中值。贴色用色度加权 Lab。
+    """
+    n_colors = max(2, min(int(n_colors), 16))
+    fg = mask > 0
+    n_fg = int(fg.sum())
+    if n_fg < 50:
+        flat = np.full_like(bgr, 255)
+        return flat, np.full(bgr.shape[:2], -1, dtype=np.int32), []
+
+    # 贴图用原像素；pre_smooth 仅作可选轻度双边（默认关，避免糊）
+    src = cv2.bilateralFilter(bgr, 5, 40, 40) if pre_smooth else bgr
+    lab = cv2.cvtColor(src, cv2.COLOR_BGR2LAB).astype(np.float32)
+    samples = lab[fg]
+
+    # 高色度像素加重采样，避免青绿/红联在过量化阶段就被吃掉
+    a0 = samples[:, 1] - 128.0
+    b0 = samples[:, 2] - 128.0
+    ch0 = np.sqrt(a0 * a0 + b0 * b0)
+    ch_n = np.clip(ch0 / max(float(np.percentile(ch0, 90)), 8.0), 0.0, 1.5)
+    reps = np.maximum(1, np.round(1.0 + ch_n * 3.0).astype(np.int32))
+    train = np.repeat(samples, reps, axis=0)
+    max_total = min(max(len(samples) * 3, n_colors * 400), 220_000)
+    if len(train) > max_total:
+        rng = np.random.default_rng(42)
+        train = train[rng.choice(len(train), size=max_total, replace=False)]
+
+    k0 = int(np.clip(over_k, n_colors + 4, 32))
+    k0 = min(k0, max(2, len(train)))
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.5)
+    _c, _lt, centers0 = cv2.kmeans(
+        train, k0, None, criteria, 4, cv2.KMEANS_PP_CENTERS
+    )
+    centers = centers0.astype(np.float32)
+    labels = _assign_lab_chroma(samples, centers, ab_weight=float(ab_weight))
+
+    # —— 小面积色标并入最近邻（高色度小岛豁免，保青绿/红联）——
+    min_px = max(40, int(n_fg * float(min_area_frac)))
+    for _pass in range(8):
+        counts = np.bincount(labels, minlength=len(centers))
+        a_c = centers[:, 1] - 128.0
+        b_c = centers[:, 2] - 128.0
+        ch_c = np.sqrt(a_c * a_c + b_c * b_c)
+        small = [
+            i
+            for i in range(len(centers))
+            if int(counts[i]) < min_px
+            and not (ch_c[i] >= float(protect_chroma) and int(counts[i]) >= 80)
+        ]
+        if len(small) == 0 or len(centers) <= n_colors:
+            break
+        order = sorted(small, key=lambda i: int(counts[i]))
+        merged_any = False
+        alive = np.ones(len(centers), dtype=bool)
+        for si in order:
+            if not alive[si] or int(counts[si]) >= min_px:
+                continue
+            if int(np.count_nonzero(alive)) <= n_colors:
+                break
+            best_j, best_d = -1, 1e18
+            for j in range(len(centers)):
+                if j == si or not alive[j] or int(counts[j]) < min_px:
+                    continue
+                d = float(_lab_dist2(centers[si], centers[j], ab_weight))
+                if d < best_d:
+                    best_d, best_j = d, j
+            if best_j < 0:
+                for j in range(len(centers)):
+                    if j == si or not alive[j]:
+                        continue
+                    d = float(_lab_dist2(centers[si], centers[j], ab_weight))
+                    if d < best_d:
+                        best_d, best_j = d, j
+            if best_j < 0:
+                continue
+            labels[labels == si] = best_j
+            alive[si] = False
+            merged_any = True
+            sel = labels == best_j
+            if np.any(sel):
+                centers[best_j] = samples[sel].mean(axis=0)
+                counts[best_j] = int(sel.sum())
+            counts[si] = 0
+        if not merged_any:
+            break
+        keep_idx = [i for i in range(len(centers)) if alive[i] and int(np.count_nonzero(labels == i)) > 0]
+        if len(keep_idx) == len(centers):
+            continue
+        lut = np.full(len(centers), 0, dtype=np.int32)
+        for new, old in enumerate(keep_idx):
+            lut[old] = new
+        labels = lut[labels]
+        centers = centers[keep_idx]
+
+    # 重算均值
+    used = sorted(int(x) for x in np.unique(labels))
+    lut = np.full(int(labels.max()) + 1, 0, dtype=np.int32)
+    centers_list: list[np.ndarray] = []
+    for new_i, old_i in enumerate(used):
+        sel = labels == old_i
+        centers_list.append(samples[sel].mean(axis=0))
+        lut[old_i] = new_i
+    centers = np.stack(centers_list, axis=0).astype(np.float32)
+    labels = lut[labels]
+
+    # —— 保底：面积≥5% 或 高色度；再合并到 n_colors ——
+    def _stats(ctr: np.ndarray, lab_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        cnt = np.bincount(lab_idx, minlength=len(ctr)).astype(np.float64)
+        a = ctr[:, 1] - 128.0
+        b = ctr[:, 2] - 128.0
+        ch = np.sqrt(a * a + b * b)
+        return cnt, ch, (cnt / max(n_fg, 1))
+
+    while len(centers) > n_colors:
+        counts, chroma, area_frac = _stats(centers, labels)
+        # 色度×√面积：小而鲜艳（衣/联）与大色块都可保底
+        score = chroma * np.sqrt(np.maximum(area_frac, 1e-6))
+        protected = (area_frac >= float(protect_area_frac)) | (chroma >= float(protect_chroma))
+        top_n = min(3, len(centers))
+        protected[np.argsort(-score)[:top_n]] = True
+        best_pair = None
+        best_d = 1e18
+        n = len(centers)
+        for i in range(n):
+            for j in range(i + 1, n):
+                # 优先合并「至少一个未保护」
+                both_prot = bool(protected[i] and protected[j])
+                d = float(_lab_dist2(centers[i], centers[j], ab_weight))
+                # 两个都保护时抬代价，但仍可在不得已时合并
+                merge_cost = d * (3.0 if both_prot else 1.0)
+                # 偏向吞掉面积更小的那侧
+                merge_cost *= 1.0 + 0.15 * min(area_frac[i], area_frac[j])
+                if merge_cost < best_d:
+                    best_d = merge_cost
+                    best_pair = (i, j)
+        if best_pair is None:
+            break
+        i, j = best_pair
+        # 保留面积大或受保护的一侧编号
+        keep, drop = i, j
+        if protected[j] and not protected[i]:
+            keep, drop = j, i
+        elif protected[i] == protected[j] and counts[j] > counts[i]:
+            keep, drop = j, i
+        labels[labels == drop] = keep
+        # 压缩
+        keep_idx = sorted(int(x) for x in np.unique(labels))
+        lut = np.full(int(labels.max()) + 1, 0, dtype=np.int32)
+        centers = np.stack([samples[labels == old].mean(axis=0) for old in keep_idx]).astype(
+            np.float32
+        )
+        for new, old in enumerate(keep_idx):
+            lut[old] = new
+        labels = lut[labels]
+
+    # 最终色度加权重绑（全前景）
+    labels = _assign_lab_chroma(samples, centers, ab_weight=ab_weight)
+    # 再按最终标签重算色心
+    keep_idx = sorted(int(x) for x in np.unique(labels))
+    lut = np.full(int(labels.max()) + 1, 0, dtype=np.int32)
+    centers = np.stack([samples[labels == old].mean(axis=0) for old in keep_idx]).astype(
+        np.float32
+    )
+    for new, old in enumerate(keep_idx):
+        lut[old] = new
+    labels = lut[labels]
+
+    centers_u8 = np.clip(centers, 0, 255).astype(np.uint8)
+    centers_bgr = cv2.cvtColor(centers_u8.reshape(1, -1, 3), cv2.COLOR_LAB2BGR).reshape(-1, 3)
+    centers_out = [centers_bgr[i] for i in range(len(centers_bgr))]
+    if dampen_warm_skin:
+        centers_out = _dampen_warm_skin_centers(centers_out)
+        # 压 a 后按新色心重绑一次
+        C2 = np.stack(
+            [
+                cv2.cvtColor(np.asarray(c, dtype=np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2LAB)
+                .reshape(3)
+                .astype(np.float32)
+                for c in centers_out
+            ],
+            axis=0,
+        )
+        labels = _assign_lab_chroma(samples, C2, ab_weight=ab_weight)
+
+    label_map = np.full(bgr.shape[:2], -1, dtype=np.int32)
+    label_map[fg] = labels
+    tone = np.full_like(bgr, 255)
+    for i, c in enumerate(centers_out):
+        tone[label_map == i] = c
+    return tone, label_map, centers_out
+
+
+def _hue_band_masks(
+    bgr: np.ndarray, mask: np.ndarray
+) -> dict[str, np.ndarray]:
+    """HSV 色相分桶：warm / cool / neutral；warm 内再拆 vivid_warm（红联等高饱和）。
+
+    cool 加 G>R + 开运算，减少脸噪点进冷桶污染色心。
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    B, G, R = bgr[..., 0], bgr[..., 1], bgr[..., 2]
+    m = mask > 0
+    warm = m & ((H <= 25) | (H >= 160))
+    # 放宽 S：青绿衣常偏灰绿，过严会掉进 neutral 再被褐心吞掉
+    cool = (
+        m
+        & (H >= 35)
+        & (H <= 100)
+        & (S >= 18)
+        & (V >= 28)
+        & (G.astype(np.int16) > R.astype(np.int16))
+    )
+    cool_u8 = cv2.morphologyEx(
+        (cool.astype(np.uint8) * 255), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+    cool = cool_u8 > 0
+    # 暖桶高饱和：红联/金边，与肤色分开保色槽
+    vivid_warm = warm & (S >= 70) & (V >= 35)
+    warm_soft = warm & ~vivid_warm
+    neutral = m & ~warm & ~cool
+    return {
+        "vivid_warm": (vivid_warm.astype(np.uint8) * 255),
+        "warm": (warm_soft.astype(np.uint8) * 255),
+        "cool": cool_u8,
+        "neutral": (neutral.astype(np.uint8) * 255),
+    }
+
+
+def _allocate_band_slots(
+    band_stats: dict[str, tuple[int, float]],
+    n_colors: int,
+    *,
+    min_cool: int = 2,
+    min_vivid: int = 2,
+) -> dict[str, int]:
+    """按面积×色度比例分槽，cool / vivid_warm 面积够时保底（优先于暖/中性）。"""
+    order = ["vivid_warm", "cool", "warm", "neutral"]
+    present = {k: v for k, v in band_stats.items() if v[0] >= 80}
+    if not present:
+        return {}
+    n = int(max(2, min(n_colors, 16)))
+    # cool/vivid 加分，避免面积小被挤掉；不过度抽干 warm（否则脸亮度阶崩）
+    scores = {}
+    for k, (px, ch) in present.items():
+        boost = 1.0 + min(ch / 40.0, 2.0)
+        if k == "cool":
+            boost *= 1.6
+        elif k == "vivid_warm":
+            boost *= 1.5
+        scores[k] = float(px) * boost
+    total = sum(scores.values()) or 1.0
+    slots = {k: 0 for k in order}
+    # 保底先占槽（克制：最多 2，留给暖/中性足够亮度阶）
+    if "cool" in present and present["cool"][0] >= 400:
+        slots["cool"] = min(min_cool, 2)
+    if "vivid_warm" in present and present["vivid_warm"][0] >= 250:
+        slots["vivid_warm"] = min(min_vivid, 2)
+    reserved = slots["cool"] + slots["vivid_warm"]
+    remain = max(0, n - reserved)
+    others = [k for k in order if k in present]
+    if remain > 0 and others:
+        raw = {k: scores[k] / total * remain for k in others}
+        for k in others:
+            slots[k] = slots.get(k, 0) + int(np.floor(raw[k]))
+        used = sum(slots.values())
+        leftover = n - used
+        if leftover > 0:
+            # 余数优先补给 cool / vivid
+            prefer = [k for k in ("cool", "vivid_warm", "warm", "neutral") if k in present]
+            frac = sorted(
+                prefer,
+                key=lambda k: (0 if k in ("cool", "vivid_warm") else 1, -(raw.get(k, 0) - np.floor(raw.get(k, 0)))),
+            )
+            for k in frac:
+                if leftover <= 0:
+                    break
+                slots[k] += 1
+                leftover -= 1
+    while sum(slots.values()) < n:
+        k_max = max(present.keys(), key=lambda k: scores[k])
+        slots[k_max] = slots.get(k_max, 0) + 1
+    return {k: int(v) for k, v in slots.items() if v > 0 and k in present}
+
+
+def _dampen_warm_skin_centers(centers_bgr: list[np.ndarray]) -> list[np.ndarray]:
+    """暖桶中亮肤：压 Lab a，减轻侧脸偏红；高饱和红心不动。"""
+    out: list[np.ndarray] = []
+    for c in centers_bgr:
+        cb = np.asarray(c, dtype=np.uint8).reshape(1, 1, 3)
+        lab = cv2.cvtColor(cb, cv2.COLOR_BGR2LAB).astype(np.float32).reshape(3)
+        hsv = cv2.cvtColor(cb, cv2.COLOR_BGR2HSV).astype(np.float32).reshape(3)
+        L, a = float(lab[0]), float(lab[1] - 128.0)
+        S = float(hsv[1])
+        # 肤：中亮 + 中等饱和；红联 S 很高则跳过
+        if 45.0 <= L <= 200.0 and a > 6.0 and S < 95.0:
+            lab[1] = 128.0 + a * 0.78
+            lab[2] = 128.0 + (float(lab[2]) - 128.0) * 0.94
+            lab_u8 = np.clip(lab, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+            out.append(cv2.cvtColor(lab_u8, cv2.COLOR_LAB2BGR).reshape(3).astype(np.uint8))
+        else:
+            out.append(np.asarray(c, dtype=np.uint8).reshape(3))
+    return out
+
+
+def quantize_tones_hue_bands(
+    bgr: np.ndarray,
+    mask: np.ndarray,
+    n_colors: int = 12,
+    *,
+    pre_smooth: bool = False,
+    dampen_warm_skin: bool = True,
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+    """V6.5c：分桶出色心 → 全图 Lab 最近邻；不做标签中值（中值会糊成油画）。
+
+    相对 V6.5：去掉硬分桶贴标 + 冷色强留针带来的斑块；相对 V6.5b：去掉 5×5 中值抹平。
+    """
+    n_colors = max(2, min(int(n_colors), 16))
+    fg = mask > 0
+    if int(fg.sum()) < 50:
+        flat = np.full_like(bgr, 255)
+        return flat, np.full(bgr.shape[:2], -1, dtype=np.int32), []
+
+    # 量化贴图用原像素 Lab，避免 bilateral/高斯把面糊掉
+    src = bgr
+    src_band = cv2.GaussianBlur(src, (3, 3), 0)
+    bands = _hue_band_masks(src_band, mask)
+    lab_full = cv2.cvtColor(src, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    band_stats: dict[str, tuple[int, float]] = {}
+    for name, bm in bands.items():
+        sel = bm > 0
+        px = int(np.count_nonzero(sel))
+        if px < 40:
+            continue
+        a = lab_full[..., 1][sel] - 128.0
+        b = lab_full[..., 2][sel] - 128.0
+        ch = float(np.sqrt(a * a + b * b).mean())
+        band_stats[name] = (px, ch)
+
+    slots = _allocate_band_slots(band_stats, n_colors)
+    if not slots:
+        return quantize_tones(bgr, mask, n_colors=n_colors, pre_smooth=pre_smooth)
+
+    centers_all: list[np.ndarray] = []
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.5)
+
+    for name in ("vivid_warm", "cool", "warm", "neutral"):
+        k = int(slots.get(name, 0))
+        if k <= 0:
+            continue
+        bm = bands[name] > 0
+        px = int(np.count_nonzero(bm))
+        if px < 40:
+            continue
+        samples = lab_full[bm]
+        n_k = min(k, max(1, len(samples)))
+        if n_k == 1:
+            centers_lab = samples.mean(axis=0, keepdims=True)
+        else:
+            _c, _lt, centers_lab = cv2.kmeans(
+                samples, n_k, None, criteria, 4, cv2.KMEANS_PP_CENTERS
+            )
+
+        centers_u8 = np.clip(centers_lab, 0, 255).astype(np.uint8)
+        centers_bgr = cv2.cvtColor(centers_u8.reshape(1, -1, 3), cv2.COLOR_LAB2BGR).reshape(
+            -1, 3
+        )
+        band_centers = [centers_bgr[i] for i in range(len(centers_bgr))]
+        if dampen_warm_skin and name == "warm":
+            band_centers = _dampen_warm_skin_centers(band_centers)
+        centers_all.extend(band_centers)
+
+    if not centers_all:
+        return quantize_tones(bgr, mask, n_colors=n_colors, pre_smooth=pre_smooth)
+
+    C = np.stack(
+        [
+            cv2.cvtColor(np.asarray(c, dtype=np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2LAB)
+            .reshape(3)
+            .astype(np.float32)
+            for c in centers_all
+        ],
+        axis=0,
+    )
+    label_map = np.full(bgr.shape[:2], -1, dtype=np.int32)
+    ys, xs = np.where(fg)
+    pix = lab_full[ys, xs]
+    best = np.zeros(len(ys), dtype=np.int32)
+    chunk = 40_000
+    for i0 in range(0, len(ys), chunk):
+        i1 = min(len(ys), i0 + chunk)
+        d2 = ((pix[i0:i1, None, :] - C[None, :, :]) ** 2).sum(axis=2)
+        best[i0:i1] = d2.argmin(axis=1).astype(np.int32)
+    label_map[ys, xs] = best
+
+    tone = np.full_like(bgr, 255)
+    for i, c in enumerate(centers_all):
+        tone[label_map == i] = c
+    return tone, label_map, centers_all
 
 
 def density_preview(bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:

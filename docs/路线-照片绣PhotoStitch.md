@@ -303,8 +303,30 @@ python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out expo
 
 **V6.3d**：脸密轨**复用 FG 的 label/centers**（不再二次 k-means），避免头身两截色；脸区 CLAHE 减弱并与原体混合。
 
+**V6.4（人物细节）**：去帽冠后 MediaPipe 重试；脸罩肤色收紧；脸内 Laplacian dens 抬；`dens_face` step×0.72 + 肤色脸窗；新增 `dens_hand_*`（同色复用）。人评：相对 v63d 几乎无感（脸区 MAE≈2.5）。
+
+**V6.4b**：FG 挖空脸/手 → 密轨独占；实心脸罩；强 CLAHE + 同色 Lab 重映射。人评：细节升，但面部偏白。
+
+**V6.4c**：保留挖空/重映射；CLAHE/锐化回调 + 高光压暗，减轻漂白。人评：仍略白于 v64。
+
+**V6.4d**：轻 CLAHE；**重映射仅结构区**，大面肤色沿用 FG label；挖空细节保留。
+
+**V6.4e（背景色准）**：BG 色数 12–16；Lab 色度加权采样（红联/金瓦占色槽）；禁高光软化 + centers 色度回拉。
+
+**V6.4f**：FG 冷色衣物加权 + centers 平衡（保青绿、压侧脸偏红）；FG 色数同步放开。人评：仍偏灰绿/侧脸红，加权不够。
+
+**V6.5（色相分桶）**：HSV 分 warm/cool/neutral + vivid_warm；桶内 Lab k-means。人评：色准升，但硬分桶+冷色强留针致不规则斑块。
+
+**V6.5b**：同上 + 标签 5×5 中值。人评：糊成油画，过平滑。
+
+**V6.5c**：分桶出色心 → 全图 Lab 重绑；**不做标签中值**；cool G>R+开运算；无冷色强留针。贴图用原像素 Lab。
+
+**V6.6（压平色板）**：过量化 → 小面积并入 → 面积≥5%/高色度保底 → 合并到 n 色；色度加权 Lab 贴色。不增依赖；无中值、无冷色强留针。人评：色准好。
+
+**V6.6b–d（细节加压）**：多脸 dens_face、结构 dens、max_side 840。人评相对 v66 无感；**冻结仍用 v66**，代码保留多脸并集，`max_side` 回 720。
+
 ```powershell
-python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_scene_v63d --mode hybrid --density-unified --bg keep --colors 12 --resolution high
+python -m embroideryforge stitch-photo samples\test_figure_kobe_multi.jpg --out exports\photo_stitch_exp\figure_kobe_multi_v66 --mode hybrid --density-unified --bg keep --colors 12 --resolution high
 ```
 
 ---
@@ -322,10 +344,13 @@ python -m embroideryforge stitch-photo <样例.jpg> --out exports\photo_stitch_e
 
 ### A.2 难例对照表（2026-11-07）
 
-| 样例 | 路径 | 脸检测 | 已知难点 | 冻结导出 |
-|------|------|--------|----------|----------|
-| 牛仔+街景 | `samples/test_figure_cowboy.jpg` | 常 `bust`（宽檐帽） | 头身色、街景糊团、帽檐挡脸 | `figure_cowboy_scene_v63d` |
-| 合成脸武侠 | `samples/test_figure_kobe_wuxia.jpg` | 常 `mediapipe` | 脸/颈色差、背景虚化树叶 | `figure_kobe_wuxia_v63d` |
+| 样例 | 路径 | 脸检测 | 已知难点 | 冻结/最新导出 |
+|------|------|--------|----------|----------------|
+| 牛仔+街景 | `samples/test_figure_cowboy.jpg` | V6.4 常 `mediapipe`（去帽冠重试） | 头身色、街景糊团、帽檐挡脸、持枪手 | 基线 `v63d`；调参对照 `v64`/`v64d` |
+| 合成脸武侠 | `samples/test_figure_kobe_wuxia.jpg` | 常 `mediapipe` | 脸/颈色差、背景虚化树叶 | 基线 `v63d` |
+| Homelander 舱内 | `samples/test_figure_kobe_homelander.jpg` | 视合成脸 | 浅发+高光脸、舱内冷色 BG | 最新 `figure_kobe_homelander_v64d` |
+| 皇庭指向 | `samples/test_figure_kobe_emperor.jpg` | 常帽檐 | 高帽、举手、红墙金瓦 | 最新 `figure_kobe_emperor_v64d` |
+| 多人院落 | `samples/test_figure_kobe_multi.jpg` | MediaPipe+Haar 多脸 | 青绿衣；冻结 v66；b–d 细节无感已回退 | 最新 `figure_kobe_multi_v66` |
 | 半身制服 | `samples/test_figure_uniform.jpg` | 视构图 | 抠底半身；用 `--bg auto` 非 keep | `figure_uniform_v6` |
 
 ### A.3 人评清单（各 1–5 分，≥3 可演示）

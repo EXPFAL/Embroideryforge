@@ -129,10 +129,11 @@ def _get_landmarker() -> Any | None:
         options = vision.FaceLandmarkerOptions(
             base_options=base,
             running_mode=vision.RunningMode.IMAGE,
-            num_faces=1,
-            min_face_detection_confidence=0.4,
-            min_face_presence_confidence=0.4,
-            min_tracking_confidence=0.4,
+            # V6.6b：多人侧脸也要进 dens_face；主脸仍取面积最大
+            num_faces=5,
+            min_face_detection_confidence=0.35,
+            min_face_presence_confidence=0.35,
+            min_tracking_confidence=0.35,
         )
         _landmarker = vision.FaceLandmarker.create_from_options(options)
         return _landmarker
@@ -142,13 +143,13 @@ def _get_landmarker() -> Any | None:
         return None
 
 
-def detect_face_landmarks(bgr: np.ndarray) -> np.ndarray | None:
-    """返回像素坐标 Nx2 (x,y)；失败 None。"""
+def detect_all_face_landmarks(bgr: np.ndarray) -> list[np.ndarray]:
+    """返回多张脸关键点列表（面积大→小）；失败空列表。"""
     if bgr is None or bgr.size == 0:
-        return None
+        return []
     landmarker = _get_landmarker()
     if landmarker is None:
-        return None
+        return []
     try:
         import mediapipe as mp
 
@@ -157,14 +158,31 @@ def detect_face_landmarks(bgr: np.ndarray) -> np.ndarray | None:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = landmarker.detect(mp_image)
         if not result.face_landmarks:
-            return None
-        face = result.face_landmarks[0]
-        pts = np.array([[lm.x * w, lm.y * h] for lm in face], dtype=np.float32)
-        if pts.shape[0] < 50:
-            return None
-        return pts
+            return []
+        out: list[np.ndarray] = []
+        for face in result.face_landmarks:
+            pts = np.array([[lm.x * w, lm.y * h] for lm in face], dtype=np.float32)
+            if pts.shape[0] < 50:
+                continue
+            out.append(pts)
+        if not out:
+            return []
+
+        def _area(pts: np.ndarray) -> float:
+            x0, x1 = float(pts[:, 0].min()), float(pts[:, 0].max())
+            y0, y1 = float(pts[:, 1].min()), float(pts[:, 1].max())
+            return max(1.0, x1 - x0) * max(1.0, y1 - y0)
+
+        out.sort(key=_area, reverse=True)
+        return out
     except Exception:
-        return None
+        return []
+
+
+def detect_face_landmarks(bgr: np.ndarray) -> np.ndarray | None:
+    """返回主脸像素坐标 Nx2 (x,y)；失败 None。"""
+    all_pts = detect_all_face_landmarks(bgr)
+    return all_pts[0] if all_pts else None
 
 
 def roi_from_landmarks(
