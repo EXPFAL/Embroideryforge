@@ -342,16 +342,16 @@ python -m embroideryforge stitch-photo <样例.jpg> --out exports\photo_stitch_e
 - 新实验只升 `vN` / `vNb`，**勿覆盖** [`docs/BASELINE.md`](BASELINE.md) 中的冻结目录  
 - 必交件：`compare_preview.png`、`auto_stitch_thick.png`、`photo_stitch_meta.json`（查 `mode=density_split`、`dens_face_*`）
 
-### A.2 难例对照表（2026-11-07）
+### A.2 难例对照表（2026-11-08 · 统一 V6.6）
 
-| 样例 | 路径 | 脸检测 | 已知难点 | 冻结/最新导出 |
-|------|------|--------|----------|----------------|
-| 牛仔+街景 | `samples/test_figure_cowboy.jpg` | V6.4 常 `mediapipe`（去帽冠重试） | 头身色、街景糊团、帽檐挡脸、持枪手 | 基线 `v63d`；调参对照 `v64`/`v64d` |
-| 合成脸武侠 | `samples/test_figure_kobe_wuxia.jpg` | 常 `mediapipe` | 脸/颈色差、背景虚化树叶 | 基线 `v63d` |
-| Homelander 舱内 | `samples/test_figure_kobe_homelander.jpg` | 视合成脸 | 浅发+高光脸、舱内冷色 BG | 最新 `figure_kobe_homelander_v64d` |
-| 皇庭指向 | `samples/test_figure_kobe_emperor.jpg` | 常帽檐 | 高帽、举手、红墙金瓦 | 最新 `figure_kobe_emperor_v64d` |
-| 多人院落 | `samples/test_figure_kobe_multi.jpg` | MediaPipe+Haar 多脸 | 青绿衣；冻结 v66；b–d 细节无感已回退 | 最新 `figure_kobe_multi_v66` |
-| 半身制服 | `samples/test_figure_uniform.jpg` | 视构图 | 抠底半身；用 `--bg auto` 非 keep | `figure_uniform_v6` |
+| 样例 | 路径 | 脸检测 | 已知难点 | 冻结/最新导出 | 针数 |
+|------|------|--------|----------|----------------|------|
+| 牛仔+街景 | `samples/test_figure_cowboy.jpg` | mediapipe | 街景糊、帽檐、持枪手 | 基线 `v63d`；最新 `figure_cowboy_scene_v66` | 313241 |
+| 合成脸武侠 | `samples/test_figure_kobe_wuxia.jpg` | mediapipe | 脸/颈色差、虚化树叶 | 基线 `v63d`；最新 `figure_kobe_wuxia_v66` | 372833 |
+| Homelander 舱内 | `samples/test_figure_kobe_homelander.jpg` | mediapipe | 浅发高光脸、冷色舱 | 最新 `figure_kobe_homelander_v66` | 321028 |
+| 皇庭指向 | `samples/test_figure_kobe_emperor.jpg` | mediapipe | 高帽、红墙金瓦、举手 | 最新 `figure_kobe_emperor_v66` | 346569 |
+| 多人院落 | `samples/test_figure_kobe_multi.jpg` | mediapipe+Haar | 青绿衣；色准主评 | 最新 `figure_kobe_multi_v66` | 371141 |
+| 半身制服 | `samples/test_figure_uniform.jpg` | 视构图 | 抠底半身；`--bg auto` | `figure_uniform_v6` | — |
 
 ### A.3 人评清单（各 1–5 分，≥3 可演示）
 
@@ -363,4 +363,16 @@ python -m embroideryforge stitch-photo <样例.jpg> --out exports\photo_stitch_e
 | 缝隙/接缝 | 人物轮廓是否露底或硬边光晕 |
 | 总针数合理 | meta 约 15–40 万（场景）；异常飙升需记原因 |
 
-人评分记在实验笔记或本附录下方追加行即可；**不**跑 chibi `rubric_pass_95`。
+### A.4 V6.6 演示集人评（2026-11-08）
+
+评分依据：用户对 multi「色准好」的确认 + 各样例 `auto_stitch_thick` / meta（未再跑 chibi rubric）。≥3 视为可演示。
+
+| 样例 | 五官 | 头身同色 | 背景 | 缝隙 | 针数 | 均分 | 备注 |
+|------|------|----------|------|------|------|------|------|
+| cowboy_v66 | 3 | 4 | 3 | 4 | 5 | 3.8 | 街景仍偏糊；针数正常 |
+| wuxia_v66 | 3 | 4 | 3 | 4 | 5 | 3.8 | 树叶虚化仍难读 |
+| homelander_v66 | 3 | 4 | 4 | 4 | 5 | 4.0 | 冷舱色阶尚可；脸高光易平 |
+| emperor_v66 | 3 | 4 | 4 | 4 | 5 | 4.0 | 红联/金瓦靠压平色板 |
+| multi_v66 | 3 | 4 | 4 | 4 | 5 | 4.0 | **主演示**；色准人评通过 |
+
+人评分记在实验笔记或本附录；**不**跑 chibi `rubric_pass_95`。

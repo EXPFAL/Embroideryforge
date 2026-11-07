@@ -32,7 +32,7 @@ python -m embroideryforge evaluate exports\accept_flat_v3 --image samples\golden
 
 ---
 
-## 照片绣 · 冻结样例（V6.3d 基线；最新实验 V6.4）
+## 照片绣 · 冻结样例（V6.3d 结构基线；最新演示 V6.6）
 
 **统一命令（场景分轨）：**
 
@@ -42,11 +42,11 @@ python -m embroideryforge stitch-photo <样例> --out <新目录> --mode hybrid 
 
 | 样例 | 输入 | 冻结导出（勿覆盖；新实验递增版本号） | 必看文件 |
 |------|------|--------------------------------------|----------|
-| 牛仔场景 | `samples/test_figure_cowboy.jpg` | 基线 `…/figure_cowboy_scene_v63d/`；最新 `…/figure_cowboy_scene_v65c/` | `compare_preview.png`、`auto_stitch_thick.png`、`photo_stitch_meta.json`（查 `v6.v66_*`） |
-| 合成脸/武侠 | `samples/test_figure_kobe_wuxia.jpg` | 基线 `…/figure_kobe_wuxia_v63d/` | 同上 |
-| Homelander 舱内 | `samples/test_figure_kobe_homelander.jpg` | 最新 `…/figure_kobe_homelander_v64d/` | 同上 |
+| 牛仔场景 | `samples/test_figure_cowboy.jpg` | 基线 `…/figure_cowboy_scene_v63d/`；最新 `…/figure_cowboy_scene_v66/` | `compare_preview.png`、`auto_stitch_thick.png`、`photo_stitch_meta.json`（查 `v6.v66_*`） |
+| 合成脸/武侠 | `samples/test_figure_kobe_wuxia.jpg` | 基线 `…/figure_kobe_wuxia_v63d/`；最新 `…/figure_kobe_wuxia_v66/` | 同上 |
+| Homelander 舱内 | `samples/test_figure_kobe_homelander.jpg` | 最新 `…/figure_kobe_homelander_v66/` | 同上 |
 | 皇庭指向 | `samples/test_figure_kobe_emperor.jpg` | 最新 `…/figure_kobe_emperor_v66/` | 红墙金瓦；V6.6 压平色板 |
-| 多人院落 | `samples/test_figure_kobe_multi.jpg` | 最新 `…/figure_kobe_multi_v66/` | V6.6 压平色板；多脸检测保留、细节加压已回退 |
+| 多人院落 | `samples/test_figure_kobe_multi.jpg` | 最新 `…/figure_kobe_multi_v66/` | 色准人评通过；演示主样例 |
 | 半身制服（抠底 V6） | `samples/test_figure_uniform.jpg` | `exports/photo_stitch_exp/figure_uniform_v6/`（若本地有） | 同上 |
 
 命名约定：自 `v63d` 起只追加版本后缀（如 `v64`、`v64b`），**不要**原地覆盖冻结目录。
