@@ -466,18 +466,24 @@ def render_density_preview(dens: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
 
 
-def dither_keep_mask(dens: np.ndarray, mask: np.ndarray, *, floor: float = 0.08) -> np.ndarray:
+def dither_keep_mask(
+    dens: np.ndarray,
+    mask: np.ndarray,
+    *,
+    floor: float = 0.08,
+    gain: float = 1.0,
+) -> np.ndarray:
+    """Bayer 留针。gain>1 降低阈值（更密）；默认 step 网格已饱和，预算主要靠 gain。"""
     ps = _ps()
     h, w = dens.shape
+    g = float(np.clip(gain, 0.35, 2.6))
     yy, xx = np.indices((h, w))
     thr = ps._BAYER8[yy % 8, xx % 8]
-    keep = ((dens >= thr * 0.92) | (dens >= 0.78)) & (dens >= floor) & (mask > 0)
-    # 高光软留针
+    keep = ((dens >= thr * (0.92 / g)) | (dens >= (0.78 / g))) & (dens >= floor) & (mask > 0)
     bright = (dens >= 0.05) & (dens < 0.28) & (mask > 0)
-    soft = bright & (dens >= thr * 0.38)
-    # 高光→中调过渡带：略加密，填中间层次
+    soft = bright & (dens >= thr * (0.38 / g))
     mid_bright = (dens >= 0.18) & (dens < 0.45) & (mask > 0)
-    bridge = mid_bright & (dens >= thr * 0.55)
+    bridge = mid_bright & (dens >= thr * (0.55 / g))
     keep = keep | soft | bridge
     return keep.astype(np.uint8) * 255
 
@@ -709,27 +715,55 @@ def sample_keep_grid(
     core_mask: np.ndarray | None = None,
     core_step_scale: float = 0.55,
 ) -> np.ndarray:
+    """按 step 采 keep。
+
+    注意：旧实现 `int(round(step))` 使 step∈(0.5,1.5) 全变成 1，
+    `--stitches-per-mm2` 加大时人眼无感。step<1 时用多相网格加密。
+    """
     h, w = keep.shape
-    step_i = max(1, int(round(step)))
+    step_f = max(0.35, float(step))
     grid = np.zeros_like(keep)
-    grid[0:h:step_i, 0:w:step_i] = 255
+    if step_f >= 1.0:
+        step_i = max(1, int(round(step_f)))
+        grid[0:h:step_i, 0:w:step_i] = 255
+    else:
+        # step=0.5 → 主相+半相共约 4 倍采样；step=0.7 → 约 2 倍
+        grid[0:h:1, 0:w:1] = 255
+        # 再按密度稀疏化：亮区抽稀，避免 step≪1 时针爆
+        if step_f > 0.55:
+            # 保留全部暗点；亮区隔点
+            bright = (dens < 0.45) & (mask > 0)
+            thin = np.zeros_like(keep)
+            thin[0:h:2, 0:w:2] = 255
+            grid = np.where(bright, np.minimum(grid, thin), grid)
     out = cv2.bitwise_and(keep, grid)
     dark = (dens >= 0.55) & (mask > 0)
-    fine_step = max(1, step_i - 1)
-    fine = np.zeros_like(keep)
-    fine[0:h:fine_step, 0:w:fine_step] = 255
-    out = np.where(dark, np.maximum(out, cv2.bitwise_and(fine, (mask > 0).astype(np.uint8) * 255)), out)
-    # 五官核：半步相位网格 + 放宽 dens 门限（step≈1 时仍能加针）
+    if step_f >= 1.0:
+        step_i = max(1, int(round(step_f)))
+        fine_step = max(1, step_i - 1)
+        fine = np.zeros_like(keep)
+        fine[0:h:fine_step, 0:w:fine_step] = 255
+        out = np.where(
+            dark,
+            np.maximum(out, cv2.bitwise_and(fine, (mask > 0).astype(np.uint8) * 255)),
+            out,
+        )
+    else:
+        # 暗部全采（已在全像素网格上）
+        out = np.where(dark & (mask > 0), np.maximum(out, 255), out)
+    # 五官核：半步相位网格 + 放宽 dens 门限
     if core_mask is not None and np.any(core_mask):
-        cstep = max(1, int(round(max(1.0, step) * core_step_scale)))
+        cstep = max(1, int(round(max(step_f, 0.5) * core_step_scale)))
         cgrid = np.zeros_like(keep)
         cgrid[0:h:cstep, 0:w:cstep] = 255
         off = max(1, cstep // 2) if cstep >= 2 else 1
         if cstep >= 2:
             cgrid[off:h:cstep, off:w:cstep] = 255
         else:
-            # 已是 1px 主网格：对角半相再采一趟
             cgrid[1:h:2, 1:w:2] = 255
+            if step_f < 0.75:
+                cgrid[0:h:2, 1:w:2] = 255
+                cgrid[1:h:2, 0:w:2] = 255
         core = (core_mask > 0) & (mask > 0)
         relaxed = (keep > 0) | ((dens >= 0.32) & core)
         extra = (cgrid > 0) & relaxed
@@ -960,6 +994,13 @@ def emit_density_layers(
     omit_mask: np.ndarray | None = None,
     structure_gain: float | None = None,
     soften_highlights: bool = True,
+    animal_palette: bool = False,
+    portrait_p0: bool = False,
+    reserve_bgr: list[np.ndarray] | None = None,
+    density_gamma: float | None = None,
+    keep_floor_scale: float = 1.0,
+    dither_gain: float = 1.0,
+    photo_blend: bool = False,
 ) -> tuple[EmbPattern, list[dict[str, Any]], bool, dict[str, np.ndarray]]:
     ps = _ps()
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -974,6 +1015,11 @@ def emit_density_layers(
     )
     is_bg_track = str(tag_prefix).startswith("dens_bg")
     is_fg_track = str(tag_prefix).startswith("dens_fg")
+    is_face_track = str(tag_prefix).startswith("dens_face")
+    animal_mode = bool(animal_palette) and (is_bg_track or is_fg_track)
+    p0 = bool(portrait_p0) and not animal_mode
+    reserve_use = list(reserve_bgr) if (p0 and reserve_bgr and (is_fg_track or is_face_track)) else None
+
     # 半身/场景/分轨：BG/FG 放开到 16 保色准（青绿衣等）
     if scene_mode:
         n_q = int(np.clip(int(n_colors) + (2 if detail_boost else 1), 10, 16))
@@ -987,18 +1033,27 @@ def emit_density_layers(
     if reuse_palette:
         label_map = fixed_label_map.copy()
         centers = [np.asarray(c, dtype=np.uint8).reshape(3) for c in fixed_centers]
+        # 不在此硬贴线表：全图 snap 会造成蒙红滤镜（人评 smoke < v66）
         tone = np.full_like(bgr, 255)
         for i, c in enumerate(centers):
             tone[label_map == i] = c
     elif is_bg_track or is_fg_track:
-        # V6.6：Wilcom 式压平色板（过量化→面积合并→色度保底）；FG 暖肤轻度压 a
-        tone, label_map, centers = ps.quantize_tones_flatten(
-            bgr,
-            mask,
-            n_colors=n_q,
-            pre_smooth=False,
-            dampen_warm_skin=bool(is_fg_track),
-        )
+        # V6.6：Wilcom 式压平色板；人像 FG 暖肤压 a；动物域关压肤并保毛色/绿叶
+        flatten_kw: dict[str, Any] = {
+            "n_colors": n_q,
+            "pre_smooth": False,
+            "dampen_warm_skin": bool(is_fg_track) and not animal_mode,
+        }
+        if animal_mode and is_fg_track:
+            flatten_kw["protect_chroma"] = 14.0
+            flatten_kw["ab_weight"] = 2.2
+        elif animal_mode and is_bg_track:
+            flatten_kw["protect_chroma"] = 12.0
+            flatten_kw["boost_green"] = 0.85
+        if reserve_use:
+            flatten_kw["reserve_bgr"] = reserve_use
+        tone, label_map, centers = ps.quantize_tones_flatten(bgr, mask, **flatten_kw)
+        # P0 仅 Reserve 保护 + 灰垫底序；线表只作层 meta 标注，不改写色心
     else:
         weight_q = None
         weight_power = 1.0
@@ -1028,20 +1083,29 @@ def emit_density_layers(
             weight_mask=weight_q,
             weight_power=weight_power if weight_q is not None else 1.0,
         )
-    dens = density_map(gray, mask, gamma=0.65 if (detail_boost and has_face) else (0.70 if detail_boost else 0.78))
-    # 场景/有脸罩时更宽核，便于五官留针
+    if density_gamma is not None:
+        dens_gamma = float(np.clip(float(density_gamma), 0.35, 2.5))
+    else:
+        dens_gamma = (
+            0.65
+            if (detail_boost and has_face)
+            else (0.68 if (animal_mode and is_fg_track) else (0.70 if detail_boost else 0.78))
+        )
+    dens = density_map(gray, mask, gamma=dens_gamma)
+    # 场景/有脸罩时更宽核，便于五官留针；动物 FG 略宽核补毛纹暗部
     core_pct = (
         18.0
         if (detail_boost and (scene_mode or has_face))
-        else (14.0 if detail_boost else 22.0)
+        else (16.0 if (animal_mode and is_fg_track) else (14.0 if detail_boost else 22.0))
     )
     # 五官核优先在真脸罩上算，避免手区脏核
     core_src = face_only_mask if face_only_mask is not None and np.any(face_only_mask) else mask
     core = feature_core_mask(gray, core_src, percentile=core_pct)
     dens_use = dens.copy()
     face = mask > 0
-    # 建筑/街景边缘加密，减轻 BG「糊成一团」
-    if edge_boost:
+    do_edge = bool(edge_boost) or (animal_mode and is_fg_track)
+    # 建筑/街景边缘加密，减轻 BG「糊成一团」；动物 FG 同开
+    if do_edge:
         edges = cv2.Canny(gray, 40, 120)
         e = (edges > 0) & face
         if np.any(e):
@@ -1096,6 +1160,16 @@ def emit_density_layers(
             percentile=48.0 if structure_gain is not None else 55.0,
             gain=float(1.30 if structure_gain is None else max(1.30, structure_gain * 0.9)),
         )
+    # 动物 FG：无 dens_face 时整主体结构 dens，暗部/毛纹轮廓留针（非丝理方向场）
+    if animal_mode and is_fg_track:
+        dens_use = face_structure_dens_boost(
+            dens_use,
+            gray,
+            mask,
+            percentile=50.0,
+            gain=1.30,
+        )
+        dens_use[face] = np.minimum(1.0, dens_use[face] * 1.10 + 0.03)
     if not reuse_palette:
         if soften_highlights and not (is_bg_track or is_fg_track):
             # 分桶轨已自管色心；旧统一轨仍软化高光
@@ -1104,8 +1178,10 @@ def emit_density_layers(
             for i, c in enumerate(centers):
                 tone[label_map == i] = np.asarray(c, dtype=np.uint8).reshape(3)
     step_scale = 0.72 if detail_boost else 0.85
-    face_step = max(1.0, float(step) * step_scale)
+    # 允许 step<1（预算加密）；旧版 max(1.0, ...) 会抹掉 --stitches-per-mm2
+    face_step = max(0.45, float(step) * step_scale)
     floor = float(keep_floor) if keep_floor is not None else (0.04 if detail_boost else 0.05)
+    floor = float(np.clip(floor * float(keep_floor_scale), 0.012, 0.12))
     # 场景/FG：脸核更细；背景疏密缓和
     if (scene_mode or has_face) and detail_boost:
         core_step = 0.22
@@ -1116,16 +1192,16 @@ def emit_density_layers(
     if sub_w is not None:
         floor_bg = float(0.07 if bg_floor is None else bg_floor)
         keep_sub = sample_keep_grid(
-            dither_keep_mask(dens_use, mask, floor=floor),
+            dither_keep_mask(dens_use, mask, floor=floor, gain=dither_gain),
             dens_use,
             mask,
             face_step,
             core_mask=core,
             core_step_scale=core_step,
         )
-        bg_step = max(1.0, float(step) * float(bg_step_scale))
+        bg_step = max(0.55, float(step) * float(bg_step_scale))
         keep_bg = sample_keep_grid(
-            dither_keep_mask(dens_use, mask, floor=floor_bg),
+            dither_keep_mask(dens_use, mask, floor=floor_bg, gain=dither_gain),
             dens_use,
             mask,
             bg_step,
@@ -1135,7 +1211,7 @@ def emit_density_layers(
         keep = np.where(mask > 0, keep, 0).astype(np.uint8)
     else:
         keep = sample_keep_grid(
-            dither_keep_mask(dens_use, mask, floor=floor),
+            dither_keep_mask(dens_use, mask, floor=floor, gain=dither_gain),
             dens_use,
             mask,
             face_step,
@@ -1153,7 +1229,7 @@ def emit_density_layers(
             phase_zone = phase_zone & sub_w
         keep = np.maximum(
             keep,
-            ((phase > 0) & phase_zone & (dither_keep_mask(dens_use, mask, floor=0.04) > 0)).astype(
+            ((phase > 0) & phase_zone & (dither_keep_mask(dens_use, mask, floor=0.04, gain=dither_gain) > 0)).astype(
                 np.uint8
             )
             * 255,
@@ -1162,7 +1238,7 @@ def emit_density_layers(
     if face_only_mask is not None and np.any(face_only_mask):
         fm = (face_only_mask > 0) & (mask > 0)
         fkeep = dither_keep_mask(
-            dens_use, (fm.astype(np.uint8) * 255), floor=0.02
+            dens_use, (fm.astype(np.uint8) * 255), floor=0.02, gain=dither_gain
         )
         keep = np.where(fm, np.maximum(keep, fkeep), keep)
         if detail_boost:
@@ -1176,7 +1252,7 @@ def emit_density_layers(
             )
     if hand_mask is not None and np.any(hand_mask):
         hm = (hand_mask > 0) & (mask > 0)
-        hkeep = dither_keep_mask(dens_use, (hm.astype(np.uint8) * 255), floor=0.02)
+        hkeep = dither_keep_mask(dens_use, (hm.astype(np.uint8) * 255), floor=0.02, gain=dither_gain)
         keep = np.where(hm, np.maximum(keep, hkeep), keep)
         if detail_boost:
             h0, w0 = keep.shape
@@ -1195,10 +1271,17 @@ def emit_density_layers(
     step_i = max(1, int(round(face_step)))
     gap = max(2, step_i + 1)
     layers: list[dict[str, Any]] = []
-    order = sorted(
-        range(len(centers)),
-        key=lambda i: float(0.114 * centers[i][0] + 0.587 * centers[i][1] + 0.299 * centers[i][2]),
-    )
+    if p0 and centers:
+        from embroideryforge.thread_chart import sew_order_indices
+
+        order = sew_order_indices(list(centers), grey_underpaint=True)
+    else:
+        order = sorted(
+            range(len(centers)),
+            key=lambda i: float(
+                0.114 * centers[i][0] + 0.587 * centers[i][1] + 0.299 * centers[i][2]
+            ),
+        )
     for idx in order:
         ys, xs = np.where((label_map == idx) & (keep > 0))
         if len(xs) < 8:
@@ -1211,38 +1294,88 @@ def emit_density_layers(
             max_connect_dx=gap,
         )
         hex_c = ps._bgr_to_hex(centers[idx])
+        thread_meta: dict[str, Any] = {}
+        if p0:
+            from embroideryforge.thread_chart import classify_center_role, snap_bgr_to_chart
+
+            sm = snap_bgr_to_chart(centers[idx])
+            thread_meta = {
+                "thread_code": sm["code"],
+                "thread_role": sm["role"],
+                "role_hsv": classify_center_role(centers[idx]),
+                "delta_e": sm["delta_e"],
+            }
         first, n_pts = _emit_polys(
             pattern, polys, hex_c=hex_c, scale=scale, height=h, first=first
         )
         if n_pts >= 2:
-            layers.append(
-                {
-                    "tag": f"{tag_prefix}_{idx}",
-                    "hex": hex_c,
-                    "bgr": [int(x) for x in centers[idx]],
-                    "stitch": "density_serpentine",
-                    "points": n_pts,
-                    "segments": len(polys),
-                    "enabled": True,
-                    "track": (
-                        "bg"
-                        if tag_prefix.startswith("dens_bg")
+            layer_rec: dict[str, Any] = {
+                "tag": f"{tag_prefix}_{idx}",
+                "hex": hex_c,
+                "bgr": [int(x) for x in centers[idx]],
+                "stitch": "density_serpentine",
+                "points": n_pts,
+                "segments": len(polys),
+                "enabled": True,
+                "track": (
+                    "bg"
+                    if tag_prefix.startswith("dens_bg")
+                    else (
+                        "fg"
+                        if tag_prefix.startswith("dens_fg")
                         else (
-                            "fg"
-                            if tag_prefix.startswith("dens_fg")
+                            "face"
+                            if tag_prefix.startswith("dens_face")
                             else (
-                                "face"
-                                if tag_prefix.startswith("dens_face")
-                                else (
-                                    "hand"
-                                    if tag_prefix.startswith("dens_hand")
-                                    else "unified"
-                                )
+                                "hand"
+                                if tag_prefix.startswith("dens_hand")
+                                else "unified"
                             )
                         )
-                    ),
-                }
+                    )
+                ),
+            }
+            if thread_meta:
+                layer_rec.update(thread_meta)
+            layers.append(layer_rec)
+    if photo_blend and len(centers) >= 2:
+        second, mix = ps.second_nearest_map(
+            bgr, mask, centers, label_map, ab_weight=2.2
+        )
+        yy, xx = np.indices(mask.shape[:2])
+        bayer = ps._BAYER8[yy % 8, xx % 8]
+        blend_on = (
+            (keep > 0)
+            & (second >= 0)
+            & (second != label_map)
+            & (mix >= 0.22)
+            & (mix <= 0.62)
+            & (bayer < 0.40)
+        )
+        for idx in order:
+            ys, xs = np.where(blend_on & (second == idx))
+            if len(xs) < 8:
+                continue
+            polys = points_to_serpentine_runs(
+                ys, xs, max_gap=gap * 2, max_row_jump=1, max_connect_dx=gap * 2
             )
+            hex_c = ps._bgr_to_hex(centers[idx])
+            first, n_pts = _emit_polys(
+                pattern, polys, hex_c=hex_c, scale=scale, height=h, first=first
+            )
+            if n_pts >= 2:
+                layers.append(
+                    {
+                        "tag": f"{tag_prefix}_blend_{idx}",
+                        "hex": hex_c,
+                        "bgr": [int(x) for x in centers[idx]],
+                        "stitch": "density_blend",
+                        "points": n_pts,
+                        "segments": len(polys),
+                        "enabled": True,
+                        "track": "blend",
+                    }
+                )
     maps = {
         "dens": dens,
         "keep": keep,
@@ -1794,18 +1927,70 @@ def run_density_v6_unified(
     resolution: str = "high",
     target_height_mm: float = 70.0,
     bg_mode: str = "auto",
+    domain: str = "auto",
+    portrait_p0: bool | None = None,
+    stitches_per_mm2: float | None = None,
+    density_contrast: float | None = None,
+    stitch_mask: str | Path | None = None,
+    photo_blend: bool = False,
 ) -> dict[str, Any]:
-    """V6：整主体统一彩色密度短针；bg=keep/scene 时 V6.3 人物/背景分轨再整合。"""
+    """V6：整主体统一彩色密度短针；bg=keep/scene 时 V6.3 人物/背景分轨再整合。
+
+    domain: auto|figure|animal — animal 强制跳过 dens_face（防宠物误检成人脸）。
+    portrait_p0: 人像 P0（Reserve+灰垫底；线表仅标注）。None/默认关——全图贴表曾致蒙红，人评不如 v66。
+    stitches_per_mm2 / density_contrast：S2 密度预算旋钮（不换填法）。
+    stitch_mask: 只绣这张罩。方案 B 用来限定一只动物，不改 dens 公式。
+    """
     ps = _ps()
     image_path = Path(image_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    domain_s = str(domain or "auto").strip().lower()
+    if domain_s not in ("auto", "figure", "animal"):
+        domain_s = "auto"
+    # 默认关：须显式 --portrait-p0
+    if portrait_p0 is None:
+        p0_on = False
+    else:
+        p0_on = bool(portrait_p0) and domain_s != "animal"
+    dens_gamma_override = (
+        float(density_contrast) if density_contrast is not None else None
+    )
+    # 高预算且未显式给 contrast 时，略降 gamma → 中调 dens 升高 → 更多 keep
+    if (
+        dens_gamma_override is None
+        and stitches_per_mm2 is not None
+        and float(stitches_per_mm2) > 6.0
+    ):
+        dens_gamma_override = float(
+            np.clip(0.78 * (6.0 / float(stitches_per_mm2)) ** 0.35, 0.45, 0.78)
+        )
 
     original = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if original is None:
         raise FileNotFoundError(image_path)
 
-    subject_bgr, subject_mask, bg_meta = prepare_subject(original, mode=bg_mode)
+    if stitch_mask is not None:
+        raw_m = cv2.imread(str(stitch_mask), cv2.IMREAD_GRAYSCALE)
+        if raw_m is None:
+            raise FileNotFoundError(stitch_mask)
+        if raw_m.shape[:2] != original.shape[:2]:
+            raw_m = cv2.resize(
+                raw_m,
+                (original.shape[1], original.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        subject_bgr = original.copy()
+        subject_mask = np.where(raw_m > 127, 255, 0).astype(np.uint8)
+        bg_meta = {
+            "mode": "stitch_mask",
+            "applied": True,
+            "scene": False,
+            "method": "given_mask",
+            "b0_one_animal": True,
+        }
+    else:
+        subject_bgr, subject_mask, bg_meta = prepare_subject(original, mode=bg_mode)
     scene = bool(bg_meta.get("scene"))
     person_mask = bg_meta.get("subject_mask")
     if person_mask is None:
@@ -1819,6 +2004,28 @@ def run_density_v6_unified(
     cfg["max_side"] = max(int(cfg["max_side"]), 520 if not scene else 720)
     spacing = float(cfg["spacing"]) * (0.92 if not scene else 0.88)
     step = max(1.0, spacing * 1.0)
+    step_before_budget = float(step)
+    budget_stitches = (
+        float(stitches_per_mm2) if stitches_per_mm2 is not None else None
+    )
+    budget_floor_scale = 1.0
+    if budget_stitches is not None and budget_stitches > 0:
+        # 线性映射。参照 6：保持默认 step；12 → step≈0.5；3 → step≈2。
+        # 注意：旧 sample_keep_grid 把 step<1 全打成 1，已修多相采样。
+        ref = 6.0
+        ratio = ref / max(0.5, budget_stitches)
+        # step<1 会走进「亮部隔点抽稀」，加密预算反而更疏。加密只降 Bayer 阈值。
+        if budget_stitches >= ref:
+            step = float(step_before_budget)
+        else:
+            step = float(np.clip(step_before_budget * ratio, 1.0, 2.8))
+        if budget_stitches > ref:
+            budget_floor_scale = float(np.clip((ref / budget_stitches) ** 1.4, 0.28, 1.0))
+        elif budget_stitches < ref:
+            budget_floor_scale = float(np.clip((ref / budget_stitches) ** 0.8, 1.0, 2.2))
+        dither_gain = float(np.clip((budget_stitches / ref) ** 1.35, 0.4, 2.4))
+    else:
+        dither_gain = 1.0
     # V6.2 场景：色数上限 16（Wilcom 复杂图量级）
     n_colors = int(np.clip(max(n_colors, 10), 8, 16 if scene else 12))
     bg_dens_scale = 0.58 if scene else None
@@ -1866,6 +2073,9 @@ def run_density_v6_unified(
         person_r = cv2.morphologyEx(person_r, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
     roi = ps._scale_roi(roi_src, subject_bgr.shape[:2], work_r.shape[:2])
+    mm_per_px = float(target_height_mm) / float(max(work_r.shape[0], 1))
+    face_width_mm = float(roi[2]) * mm_per_px
+    face_width_warn = bool(face_width_mm < 100.0) and domain_s != "animal"
     lm_r = ps._scale_landmarks(face_landmarks_src, subject_bgr.shape[:2], work_r.shape[:2])
     # V6.6b：多脸罩并集（次要脸 ≥ 主脸面积 12% 才并入，防噪）
     face_m = np.zeros(work_r.shape[:2], dtype=np.uint8)
@@ -1913,6 +2123,28 @@ def run_density_v6_unified(
     face_m = tighten_bust_face_mask(
         person_r, face_m, face_source, bgr=work_r
     )
+    # 人脸密轨门控：animal 域强制关；auto 需 MediaPipe 真人脸；figure 尽量保留
+    mp_face_ok = bool(
+        face_source == "mediapipe"
+        and face_landmarks_src is not None
+        and int(n_faces_detect) >= 1
+        and int(np.count_nonzero(face_m)) >= 120
+    )
+    if domain_s == "animal":
+        valid_human_face = False
+    elif domain_s == "figure":
+        valid_human_face = bool(mp_face_ok or int(np.count_nonzero(face_m)) >= 120)
+    else:
+        valid_human_face = bool(mp_face_ok)
+    if not valid_human_face:
+        face_m = np.zeros(work_r.shape[:2], dtype=np.uint8)
+        n_faces_detect = 0
+
+    reserve_bgr: list[np.ndarray] = []
+    if p0_on and np.any(face_m):
+        from embroideryforge.thread_chart import sample_reserve_bgr
+
+        reserve_bgr = sample_reserve_bgr(work_r, face_m)
 
     hand_m = np.zeros(work_mask_r.shape, dtype=np.uint8)
     try:
@@ -1953,13 +2185,14 @@ def run_density_v6_unified(
         cv2.imwrite(str(out_dir / "fg_mask.png"), fg_mask)
 
         # 背景：禁 bilateral；轻锐化；色相分桶保红联/金瓦
+        animal_run = domain_s == "animal"
         bg_bgr = unsharp_masked(work_r, bg_mask, radius=1.0, amount=0.35)
         pattern, layers_bg, first, maps_bg = emit_density_layers(
             pattern,
             bg_bgr,
             bg_mask,
             n_colors=n_colors_bg,
-            step=max(1.0, float(step) * 1.18),
+            step=max(0.45, float(step) * 1.18),
             target_height_mm=target_height_mm,
             first=True,
             detail_boost=False,
@@ -1968,6 +2201,13 @@ def run_density_v6_unified(
             pre_smooth=False,
             edge_boost=True,
             soften_highlights=False,
+            animal_palette=animal_run,
+            portrait_p0=p0_on,
+            reserve_bgr=reserve_bgr or None,
+            density_gamma=dens_gamma_override,
+            keep_floor_scale=budget_floor_scale,
+            dither_gain=dither_gain,
+            photo_blend=photo_blend,
         )
         face_fg = cv2.bitwise_and(face_m, fg_mask)
         hand_fg = cv2.bitwise_and(hand_m, fg_mask) if np.any(hand_m) else None
@@ -2004,7 +2244,7 @@ def run_density_v6_unified(
             fg_bgr,
             fg_mask,
             n_colors=n_colors_fg,
-            step=max(1.0, float(step) * 0.95),
+            step=max(0.45, float(step) * (0.90 if animal_run else 0.95)),
             target_height_mm=target_height_mm,
             first=first,
             detail_boost=True,
@@ -2014,6 +2254,14 @@ def run_density_v6_unified(
             pre_smooth=False,
             omit_mask=omit_for_fg if np.any(omit_for_fg) else None,
             soften_highlights=False,
+            edge_boost=bool(animal_run),
+            animal_palette=animal_run,
+            portrait_p0=p0_on,
+            reserve_bgr=reserve_bgr or None,
+            density_gamma=dens_gamma_override,
+            keep_floor_scale=budget_floor_scale,
+            dither_gain=dither_gain,
+            photo_blend=photo_blend,
         )
         layers = layers_bg + layers_fg
         dens = np.maximum(maps_bg["dens"], maps_fg["dens"])
@@ -2023,10 +2271,12 @@ def run_density_v6_unified(
         core = maps_fg.get("core")
 
         # V6.4b：同色线 + CLAHE 后重映射 label；结构 dens 加力
+        # 动物/无人脸：跳过 dens_face（只跑 BG/FG）
         fg_labels = maps_fg.get("label_map")
         fg_centers = maps_fg.get("centers")
         if (
-            np.any(face_pass)
+            valid_human_face
+            and np.any(face_pass)
             and int(np.count_nonzero(face_pass)) >= 120
             and fg_labels is not None
             and fg_centers
@@ -2048,7 +2298,7 @@ def run_density_v6_unified(
                 face_bgr,
                 face_pass,
                 n_colors=len(fg_centers),
-                step=max(1.0, float(step) * 0.50),
+                step=max(0.45, float(step) * 0.50),
                 target_height_mm=target_height_mm,
                 first=first,
                 detail_boost=True,
@@ -2059,6 +2309,12 @@ def run_density_v6_unified(
                 fixed_label_map=face_labels,
                 fixed_centers=fg_centers,
                 structure_gain=1.62,
+                portrait_p0=p0_on,
+                reserve_bgr=reserve_bgr or None,
+                density_gamma=dens_gamma_override,
+                keep_floor_scale=budget_floor_scale,
+            dither_gain=dither_gain,
+            photo_blend=photo_blend,
             )
             layers = layers + layers_face
             n_colors_face = len(fg_centers)
@@ -2091,7 +2347,7 @@ def run_density_v6_unified(
                 hand_bgr,
                 hand_pass,
                 n_colors=len(fg_centers),
-                step=max(1.0, float(step) * 0.70),
+                step=max(0.45, float(step) * 0.70),
                 target_height_mm=target_height_mm,
                 first=first,
                 detail_boost=True,
@@ -2102,6 +2358,12 @@ def run_density_v6_unified(
                 fixed_label_map=hand_labels,
                 fixed_centers=fg_centers,
                 structure_gain=1.38,
+                portrait_p0=p0_on,
+                reserve_bgr=reserve_bgr or None,
+                density_gamma=dens_gamma_override,
+                keep_floor_scale=budget_floor_scale,
+            dither_gain=dither_gain,
+            photo_blend=photo_blend,
             )
             layers = layers + layers_hand
             dens = np.maximum(dens, maps_hand["dens"])
@@ -2124,6 +2386,12 @@ def run_density_v6_unified(
             subject_weight=None,
             bg_dens_scale=0.42,
             bg_step_scale=1.75,
+            portrait_p0=p0_on,
+            reserve_bgr=reserve_bgr or None,
+            density_gamma=dens_gamma_override,
+            keep_floor_scale=budget_floor_scale,
+            dither_gain=dither_gain,
+            photo_blend=photo_blend,
         )
         layers = dens_layers
         dens, keep, tone = maps["dens"], maps["keep"], maps["tone"]
@@ -2244,8 +2512,19 @@ def run_density_v6_unified(
         "n_colors_face": (n_colors_face if split and layers_face else None),
         "resolution": resolution,
         "step_px": step,
+        "step_px_before_budget": step_before_budget,
+        "stitches_per_mm2": budget_stitches,
+        "dither_gain": dither_gain,
+        "density_contrast": dens_gamma_override,
         "resize_scale": resize_scale,
         "face_frac": round(float(face_frac), 4),
+        "face_width_mm": round(float(face_width_mm), 2),
+        "face_width_warn": bool(face_width_warn),
+        "warnings": (
+            [f"face_width_mm={face_width_mm:.1f}<100; dens not raised"]
+            if face_width_warn
+            else []
+        ),
         "n_hands": int((figure_geo or {}).get("n_hands") or 0),
         "scene": {
             "enabled": bool(scene),
@@ -2262,7 +2541,17 @@ def run_density_v6_unified(
             "xywh": [int(x0), int(y0), int(w0), int(h0)],
             "detector": face_source,
         },
-        "face_detect": {"source": face_source, "mediapipe": face_source == "mediapipe"},
+        "domain": (
+            "animal"
+            if domain_s == "animal" or (domain_s == "auto" and not valid_human_face)
+            else "figure"
+        ),
+        "domain_request": domain_s,
+        "face_detect": {
+            "source": face_source,
+            "mediapipe": face_source == "mediapipe",
+            "valid_human_face": bool(valid_human_face),
+        },
         "bg": bg_meta_json,
         "palette": [L.get("hex") for L in layers if L.get("hex")],
         "layers": layers,
@@ -2291,6 +2580,19 @@ def run_density_v6_unified(
             "v66b_multi_face": bool(split and n_faces_detect > 1),
             "v66c_face_structure": bool(split and bool(layers_face)),
             "v66d_face_finer_step": bool(split and bool(layers_face)),
+            "v66_animal_a0": bool(split and not valid_human_face and domain_s != "animal"),
+            "v66_animal_a1": bool(split and domain_s == "animal"),
+            "animal_no_skin_dampen": bool(split and domain_s == "animal"),
+            "animal_fg_structure_dens": bool(split and domain_s == "animal"),
+            "v66_portrait_p0": bool(p0_on),
+            "density_budget": bool(budget_stitches is not None or dens_gamma_override is not None),
+            "photo_blend": bool(photo_blend),
+            "portrait_thread_chart": False,
+            "portrait_thread_meta_only": bool(p0_on),
+            "portrait_reserve": bool(p0_on and bool(reserve_bgr)),
+            "portrait_grey_underpaint": bool(p0_on),
+            "portrait_no_global_snap": True,
+            "n_reserve_colors": int(len(reserve_bgr)),
             "n_faces": int(n_faces_detect),
             "v62b_face_hand_fullres": True,
         },
@@ -2306,7 +2608,19 @@ def run_density_v6_unified(
             "fabric_bg": "dark",
         },
         "note": (
-            "V6.6: flatten palette + multi-face dens_face union; max_side=720 (detail bumps rolled back)"
+            (
+                "V6.6 animal A1: no warm-skin dampen; FG structure dens + edges; BG green protect; dens_face skipped; no fur direction"
+                if (split and domain_s == "animal")
+                else (
+                    "V6.6 animal A0: flatten palette BG/FG only; dens_face skipped (no MediaPipe human face)"
+                    if (split and not valid_human_face)
+                    else (
+                        "V6.6 + portrait P0: Reserve skin/lips/eyes + grey underpaint; no global thread-chart snap (avoids red cast)"
+                        if p0_on
+                        else "V6.6: flatten palette + multi-face dens_face union; max_side=720 (detail bumps rolled back)"
+                    )
+                )
+            )
             if split
             else "V6 unified subject density"
         ),
@@ -2355,6 +2669,12 @@ def run_density_photo(
     bg_mode: str = "auto",
     hybrid_body: bool = True,
     unified: bool | None = None,
+    domain: str = "auto",
+    portrait_p0: bool | None = None,
+    stitches_per_mm2: float | None = None,
+    density_contrast: float | None = None,
+    stitch_mask: str | Path | None = None,
+    photo_blend: bool = False,
 ) -> dict[str, Any]:
     """密度场分发：unified=True 强制 V6；None 时半身自动 V6；False 强制 v4.1.1。"""
     use_v6 = unified is True
@@ -2371,6 +2691,12 @@ def run_density_photo(
             resolution=resolution,
             target_height_mm=target_height_mm,
             bg_mode=bg_mode,
+            domain=domain,
+            portrait_p0=portrait_p0,
+            stitches_per_mm2=stitches_per_mm2,
+            density_contrast=density_contrast,
+            stitch_mask=stitch_mask,
+            photo_blend=photo_blend,
         )
     return run_density_v4(
         image_path,

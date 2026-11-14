@@ -1,6 +1,6 @@
 # 路线：照片绣（Photo-Stitch）— 对标 Wilcom 彩色照片绣
 
-**状态**：P0–P1 完成；**P2 hybrid + Streamlit 已接通**  
+**状态**：P0–P1 完成；**P2 hybrid + Streamlit 已接通**；人像 V6.6 dens **冻结并作演示默认**。Portrait P0 全图线表贴色因人评蒙红已默认关（`--portrait-p0` 仅 Reserve+灰垫底）。吸收清单见 [`调研-人像照片绣成熟方案.md`](调研-人像照片绣成熟方案.md)；前沿吸收笔记见 [`调研-前沿文献-照片绣.md`](调研-前沿文献-照片绣.md) **§8**。动物见 [`路线-动物PhotoStitch.md`](路线-动物PhotoStitch.md) / [`调研-动物照片绣成熟方案.md`](调研-动物照片绣成熟方案.md)。
 
 **对标参照**：Wilcom「彩色照片绣 / Photo Flash」（多针位、分辨率档、色调预览）  
 **与 EFR 关系**：EFR（`docs/创新点-照片EFR.md`）保留为**扁平可绣对照轨**；人像五官可辨的主攻改走本路线。
@@ -122,13 +122,24 @@ python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports
 
 ---
 
-## 6. 相关工作（叙事用）
+## 6. 相关工作（叙事用 · 开题固定三段）
 
-- **Wilcom Photo Flash / 彩色照片绣**：工业上限与 UI 隐喻（分辨率、针位列表、双预览）。
-- **Embird Sfumato 等**：同类「照片→疏密针」闭源参照。
-- **Ink/Stitch**：矢量填缝为主，不是 Photo Flash。
-- **embroidery-streamlines**：方向场可研，二期。
-- **本仓库 EFR**：证明扁平轨边界，衬托本路线必要性。
+1. **工业闭源**：Wilcom / Hatch Color PhotoStitch、Brother PS1 — 写真上限（叠层混色）；本仓库不对等复刻。  
+2. **可缝路径学术**：Liu et al. 2023 CGF（密度 α + 方向 v → 流线 → 可缝）；DIGISEW 密度×方向场。动物斑块见 `--streamlines-patch`。  
+3. **绣纹图像合成**：MSEmbGAN 等 GAN/风格迁移 — 输出 **RGB 绣纹预览**，**不是 DST**；仅作相关工作对照。  
+
+工程参照：Boldbobbin（stipple 密度预算）· Embird Sfumato（人像旋钮隐喻）· Ink/Stitch（矢量填缝，非 CPS）· 本仓库 EFR（扁平轨边界）。  
+文献清单与吸收笔记：[`调研-前沿文献-照片绣.md`](调研-前沿文献-照片绣.md) §8。
+
+**密度预算（S2 已接通，不换 V6.6 引擎）**
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out exports\photo_stitch_exp\figure_cowboy_dens_budget --mode hybrid --density-unified --bg keep --domain figure --stitches-per-mm2 8 --density-contrast 0.95
+```
+
+- `--stitches-per-mm2`：相对 ~6/mm² 参照缩放 `step_px`  
+- `--density-contrast`：密度 gamma  
+- 脸幅 &lt; ~100 mm → `face_width_warn`（不硬抬 dens）
 
 ---
 
@@ -136,7 +147,7 @@ python -m embroideryforge stitch-photo samples\golden-portrait.jpg --out exports
 
 1. **真问题**：工业照片绣靠闭源密度算法；开源扁平量化直填或 EFR 大面，人像五官系统性不可辨。  
 2. **假设**：有限针位 + 色调密度 Photo-Stitch，在脸部 ROI 上相对 EFR/naive 可复现、可人评增益。  
-3. **策略**：插画链保交付；EFR 作对照；Photo-Stitch 作照片域主创新，Wilcom 只作上限参照不写已追平。
+3. **策略**：插画链保交付；EFR 作对照；Photo-Stitch dens→DST 为主创新，可选流线斑块（动物毛发）；Wilcom/GAN 只作上限/相关工作，不写已追平、不训网络。
 
 ---
 
@@ -325,6 +336,8 @@ python -m embroideryforge stitch-photo samples\test_figure_cowboy.jpg --out expo
 
 **V6.6b–d（细节加压）**：多脸 dens_face、结构 dens、max_side 840。人评相对 v66 无感；**冻结仍用 v66**，代码保留多脸并集，`max_side` 回 720。
 
+**Portrait P0（吸收实验）**：曾全图贴肤色线表 → 人评蒙红、无细节增益，**默认关**。可选 `--portrait-p0` 仅 Reserve + 灰垫底。演示仍用 `*_v66`。
+
 ```powershell
 python -m embroideryforge stitch-photo samples\test_figure_kobe_multi.jpg --out exports\photo_stitch_exp\figure_kobe_multi_v66 --mode hybrid --density-unified --bg keep --colors 12 --resolution high
 ```
@@ -362,6 +375,8 @@ python -m embroideryforge stitch-photo <样例.jpg> --out exports\photo_stitch_e
 | 背景可读 | 建筑/树叶是否「一团」；边缘是否可辨 |
 | 缝隙/接缝 | 人物轮廓是否露底或硬边光晕 |
 | 总针数合理 | meta 约 15–40 万（场景）；异常飙升需记原因 |
+
+结构化辅评（DeepSeek 识图，不改 dens）：见 [`路线-VisionJudge.md`](路线-VisionJudge.md)；`judge-photo` → `vision_judge.json`。
 
 ### A.4 V6.6 演示集人评（2026-11-08）
 

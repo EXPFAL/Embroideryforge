@@ -52,3 +52,25 @@ python -m embroideryforge stitch-photo <样例> --out <新目录> --mode hybrid 
 命名约定：自 `v63d` 起只追加版本后缀（如 `v64`、`v64b`），**不要**原地覆盖冻结目录。
 
 照片绣验收：人评清单见 [`路线-照片绣PhotoStitch.md`](路线-照片绣PhotoStitch.md) 附录；**不用** `rubric_pass_95`。
+
+人像 V6.6 冻结不动。动物演示见下节。
+
+---
+
+## 动物照片绣 · A1（复用 V6.6，`--domain animal`）
+
+**路线文档：** [`路线-动物PhotoStitch.md`](路线-动物PhotoStitch.md)  
+**样例对照：** [`samples/README.md`](../samples/README.md)（`test_animal_01`…`09`）  
+人像 V6.6 冻结不动；动物 A1：关 FG 暖肤压色、FG 结构 dens、BG 保绿。
+
+```powershell
+python -m embroideryforge stitch-photo samples\test_animal_04.jpg --out exports\photo_stitch_exp\animal_04_a1 --mode hybrid --density-unified --bg keep --colors 12 --resolution high --domain animal
+```
+
+| 样例 | 输入 | A1 导出（本地；exports 不入库） | 必看 |
+|------|------|----------------------------------|------|
+| 主演示 · 室内狗群+鹿 | `samples/test_animal_04.jpg` | `exports/photo_stitch_exp/animal_04_a1/` | thick / compare / meta（`v66_animal_a1`、无 dens_face） |
+| 橘猫毛色 | `samples/test_animal_02.jpg` | `exports/photo_stitch_exp/animal_02_a1/` | 毛色勿发灰 |
+| 户外三狗+绿叶 | `samples/test_animal_01.jpg` | `exports/photo_stitch_exp/animal_01_a1/` | 绿叶 / 轮廓 |
+
+验收：「物种可辨 + 毛色 + 毛发轮廓（非丝理）+ 绿叶更贴」；不用 `rubric_pass_95`。A0 目录可留作对照。

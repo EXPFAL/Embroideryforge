@@ -81,6 +81,35 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("efr_dir", type=Path)
     p_cmp.add_argument("--out", type=Path, default=None)
 
+    p_j = sub.add_parser(
+        "judge-photo",
+        help="DeepSeek 识图裁判：原图+预览 → vision_judge.json（辅评，不改 dens）",
+    )
+    p_j.add_argument("export_dir", type=Path)
+    p_j.add_argument("--image", type=Path, default=None, help="原图；缺省尝试从导出推断")
+    p_j.add_argument(
+        "--rubric",
+        choices=["auto", "portrait", "animal"],
+        default="auto",
+        help="评分表；auto 读 meta.domain",
+    )
+    p_j.add_argument("--no-compare", action="store_true", help="不附带 compare_preview")
+    p_j.add_argument("--max-side", type=int, default=1280, help="送模前缩边")
+
+    p_jp = sub.add_parser(
+        "judge-photo-pair",
+        help="DeepSeek 识图 A/B 对照 → vision_judge_pair.json",
+    )
+    p_jp.add_argument("dir_a", type=Path)
+    p_jp.add_argument("dir_b", type=Path)
+    p_jp.add_argument("--image", type=Path, default=None)
+    p_jp.add_argument(
+        "--rubric",
+        choices=["auto", "portrait", "animal"],
+        default="auto",
+    )
+    p_jp.add_argument("--max-side", type=int, default=1280)
+
     p_ps = sub.add_parser("stitch-photo", help="照片绣 Photo-Stitch（色调密度短填，不替代 stitch-auto）")
     p_ps.add_argument("image", type=Path)
     p_ps.add_argument("--out", type=Path, required=True)
@@ -124,6 +153,53 @@ def main(argv: list[str] | None = None) -> int:
         "--no-density-unified",
         action="store_true",
         help="强制 v4.1.1（禁止半身自动切 V6）",
+    )
+    p_ps.add_argument(
+        "--domain",
+        choices=["auto", "figure", "animal"],
+        default="auto",
+        help="animal=跳过 dens_face（宠物/多宠）；figure=保留人脸密轨；auto=有 MediaPipe 人脸才开",
+    )
+    p_ps.add_argument(
+        "--portrait-p0",
+        action="store_true",
+        help="人像 P0：Reserve 肤唇眼 + 灰垫底序（默认关；不做全图线表贴色，避免蒙红）",
+    )
+    p_ps.add_argument(
+        "--no-portrait-p0",
+        action="store_true",
+        help="显式关闭人像 P0（与默认相同）",
+    )
+    p_ps.add_argument(
+        "--streamlines-patch",
+        nargs="?",
+        const="AUTO",
+        default=None,
+        metavar="MASK",
+        help="A2 流线单连通域 spike；MASK=罩图路径，省略则用主体最大连通域（不改 dens）",
+    )
+    p_ps.add_argument(
+        "--stitches-per-mm2",
+        type=float,
+        default=None,
+        help="人像密度预算（针/mm²）；映射 step，不换填法",
+    )
+    p_ps.add_argument(
+        "--density-contrast",
+        type=float,
+        default=None,
+        help="密度对比度 γ（默认沿用 dens gamma；>1 更拉开疏密）",
+    )
+    p_ps.add_argument(
+        "--stitch-mask",
+        type=Path,
+        default=None,
+        help="只绣这张罩（与输入同尺寸）。方案 B 单动物构图，不改 dens",
+    )
+    p_ps.add_argument(
+        "--photo-blend",
+        action="store_true",
+        help="商用叠色：中间调再绣次近线色，密度约主色四成",
     )
 
     p_vec = sub.add_parser("vectorize", help="VTracer 位图→SVG 旁路（不替代 stitch-auto）")
@@ -241,13 +317,51 @@ def main(argv: list[str] | None = None) -> int:
         report = compare_photo_exports(args.naive_dir, args.efr_dir, out_json=args.out)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("ok") else 1
+    if args.cmd == "judge-photo":
+        from embroideryforge.vision_judge import judge_photo_export
+
+        report = judge_photo_export(
+            args.export_dir,
+            image=args.image,
+            rubric=args.rubric,
+            include_compare=not args.no_compare,
+            max_side=int(args.max_side),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("ok") else 1
+    if args.cmd == "judge-photo-pair":
+        from embroideryforge.vision_judge import judge_photo_pair
+
+        report = judge_photo_pair(
+            args.dir_a,
+            args.dir_b,
+            image=args.image,
+            rubric=args.rubric,
+            max_side=int(args.max_side),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("ok") else 1
     if args.cmd == "stitch-photo":
         from embroideryforge.photo_stitch import run_photo_stitch
 
         mode = args.mode
         if args.full_frame or args.no_face_roi:
             mode = "full"
-        if args.density_field or args.density_unified:
+        stream_arg = getattr(args, "streamlines_patch", None)
+        if stream_arg is not None:
+            from embroideryforge.streamlines_patch import run_streamlines_patch
+
+            mask_p = None if stream_arg == "AUTO" else Path(stream_arg)
+            result = run_streamlines_patch(
+                args.image,
+                args.out,
+                mask_path=mask_p,
+                n_colors=args.colors,
+                resolution=args.resolution,
+                target_height_mm=args.height_mm,
+                bg_mode=args.bg if args.bg != "auto" else "keep",
+            )
+        elif args.density_field or args.density_unified:
             from embroideryforge.density_field import run_density_photo
 
             if args.density_unified:
@@ -256,6 +370,12 @@ def main(argv: list[str] | None = None) -> int:
                 unified = False
             else:
                 unified = None  # 半身自动 V6
+            if getattr(args, "no_portrait_p0", False):
+                p0_flag: bool | None = False
+            elif getattr(args, "portrait_p0", False):
+                p0_flag = True
+            else:
+                p0_flag = None
             result = run_density_photo(
                 args.image,
                 args.out,
@@ -265,6 +385,12 @@ def main(argv: list[str] | None = None) -> int:
                 bg_mode=args.bg,
                 hybrid_body=mode != "face",
                 unified=unified,
+                domain=str(args.domain),
+                portrait_p0=p0_flag,
+                stitches_per_mm2=getattr(args, "stitches_per_mm2", None),
+                density_contrast=getattr(args, "density_contrast", None),
+                stitch_mask=getattr(args, "stitch_mask", None),
+                photo_blend=bool(getattr(args, "photo_blend", False)),
             )
         else:
             result = run_photo_stitch(

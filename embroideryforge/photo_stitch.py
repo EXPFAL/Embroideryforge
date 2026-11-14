@@ -335,6 +335,59 @@ def _assign_lab_chroma(
     return labels
 
 
+def second_nearest_map(
+    bgr: np.ndarray,
+    mask: np.ndarray,
+    centers_bgr: list[np.ndarray],
+    primary: np.ndarray,
+    *,
+    ab_weight: float = 2.2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """每个前景像素的次近线色，以及次色占比 d1/(d1+d2)。主色很贴时占比接近 0。"""
+    h, w = mask.shape[:2]
+    second = np.full((h, w), -1, dtype=np.int32)
+    ratio = np.zeros((h, w), dtype=np.float32)
+    if len(centers_bgr) < 2 or not np.any(mask > 0):
+        return second, ratio
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    centers = np.stack(
+        [
+            cv2.cvtColor(np.asarray(c, dtype=np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2LAB)
+            .reshape(3)
+            .astype(np.float32)
+            for c in centers_bgr
+        ],
+        axis=0,
+    )
+    ys, xs = np.where((mask > 0) & (primary >= 0))
+    if len(xs) == 0:
+        return second, ratio
+    samples = lab[ys, xs]
+    prim = primary[ys, xs].astype(np.int32)
+    sec = np.full(len(samples), -1, dtype=np.int32)
+    rat = np.zeros(len(samples), dtype=np.float32)
+    wgt = float(ab_weight)
+    chunk = 80_000
+    for i0 in range(0, len(samples), chunk):
+        sl = samples[i0 : i0 + chunk]
+        pr = np.clip(prim[i0 : i0 + chunk], 0, len(centers) - 1)
+        dL = sl[:, None, 0] - centers[None, :, 0]
+        da = sl[:, None, 1] - centers[None, :, 1]
+        db = sl[:, None, 2] - centers[None, :, 2]
+        d2 = dL * dL + wgt * (da * da + db * db)
+        rows = np.arange(len(sl))
+        d1 = d2[rows, pr]
+        d2s = d2.copy()
+        d2s[rows, pr] = 1e18
+        sidx = d2s.argmin(axis=1).astype(np.int32)
+        d_second = d2s[rows, sidx]
+        rat[i0 : i0 + chunk] = np.sqrt(d1) / (np.sqrt(d1) + np.sqrt(d_second) + 1e-6)
+        sec[i0 : i0 + chunk] = sidx
+    second[ys, xs] = sec
+    ratio[ys, xs] = rat
+    return second, ratio
+
+
 def quantize_tones_flatten(
     bgr: np.ndarray,
     mask: np.ndarray,
@@ -347,10 +400,14 @@ def quantize_tones_flatten(
     protect_area_frac: float = 0.05,
     protect_chroma: float = 16.0,
     ab_weight: float = 2.05,
+    boost_green: float = 0.0,
+    reserve_bgr: list[np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
     """V6.6 Wilcom 式压平色板：过量化 → 小面积并入 → 高面积/高色度保底 → 合并到 n_colors。
 
     不做 HSV 硬桶、不做标签中值。贴色用色度加权 Lab。
+    boost_green>0 时对 Lab 绿相高色度像素额外加重采样（动物 BG 保叶）。
+    reserve_bgr：人像 P0 Reserve（肤/唇/眼），合并时额外保护近邻色心。
     """
     n_colors = max(2, min(int(n_colors), 16))
     fg = mask > 0
@@ -370,6 +427,12 @@ def quantize_tones_flatten(
     ch0 = np.sqrt(a0 * a0 + b0 * b0)
     ch_n = np.clip(ch0 / max(float(np.percentile(ch0, 90)), 8.0), 0.0, 1.5)
     reps = np.maximum(1, np.round(1.0 + ch_n * 3.0).astype(np.int32))
+    bg = float(boost_green)
+    if bg > 0.0:
+        # Lab 绿：a 偏低；略抬采样权重，减轻绿叶被并入灰褐
+        greenish = (a0 < -4.0) & (ch0 >= 10.0)
+        extra = np.round(reps.astype(np.float32) * bg).astype(np.int32)
+        reps = np.where(greenish, reps + np.maximum(1, extra), reps)
     train = np.repeat(samples, reps, axis=0)
     max_total = min(max(len(samples) * 3, n_colors * 400), 220_000)
     if len(train) > max_total:
@@ -469,6 +532,12 @@ def quantize_tones_flatten(
         protected = (area_frac >= float(protect_area_frac)) | (chroma >= float(protect_chroma))
         top_n = min(3, len(centers))
         protected[np.argsort(-score)[:top_n]] = True
+        if reserve_bgr:
+            from embroideryforge.thread_chart import protect_mask_for_centers
+
+            protected = protected | protect_mask_for_centers(
+                centers, reserve_bgr, max_de=22.0, ab_weight=float(ab_weight)
+            )
         best_pair = None
         best_d = 1e18
         n = len(centers)

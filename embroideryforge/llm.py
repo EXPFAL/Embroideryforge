@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -13,6 +14,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+import cv2
+import numpy as np
 
 from embroideryforge.plan import SCHEMA_VERSION, apply_quality, build_rules_plan, validate_plan
 
@@ -68,8 +72,39 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("LLM response does not contain a JSON object")
 
 
+def encode_image_data_url(
+    path: str | Path,
+    *,
+    max_side: int = 1280,
+    quality: int = 85,
+) -> str:
+    """读本地图 → 缩边 → JPEG base64 data URL（Vision 请求用）。"""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise ValueError(f"cannot read image: {path}")
+    h, w = bgr.shape[:2]
+    side = max(h, w)
+    if side > int(max_side) > 0:
+        scale = float(max_side) / float(side)
+        nw = max(1, int(round(w * scale)))
+        nh = max(1, int(round(h * scale)))
+        bgr = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(
+        ".jpg",
+        bgr,
+        [int(cv2.IMWRITE_JPEG_QUALITY), int(np.clip(quality, 40, 95))],
+    )
+    if not ok:
+        raise RuntimeError(f"JPEG encode failed: {path}")
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
 def chat_completion(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     api_key: str | None = None,
     base_url: str | None = None,
@@ -77,7 +112,10 @@ def chat_completion(
     temperature: float = 0.2,
     timeout_s: float = 90.0,
 ) -> str:
-    """调用 DeepSeek Chat Completions，返回 assistant content。"""
+    """调用 DeepSeek Chat Completions，返回 assistant content。
+
+    messages 可为纯文本或 multimodal（content 为 text/image_url 块列表）。
+    """
     key = api_key or get_api_key()
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
@@ -89,7 +127,7 @@ def chat_completion(
         "messages": messages,
         "stream": False,
         "temperature": temperature,
-        # 结构化针法不需要长思维链
+        # 结构化针法 / JSON 裁判不需要长思维链
         "thinking": {"type": "disabled"},
     }
     req = urllib.request.Request(
